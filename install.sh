@@ -1,2114 +1,3187 @@
 #!/usr/bin/env bash
+set -Eeuo pipefail
+
 # ============================================================
-#  GrimVM Panel — Full Auto Installer v2.0
-#  Author:  Vasplayz90 • ArizNodes Team
-#  Project: #5
-#  License: MIT
-#  Copyright: Reserved 2026 Team • ArizNodes
-#  GitHub:  https://github.com/Vasplayz90OG/GrimVM--5
-#  Mode: Cloudflare Tunnel (no certbot needed)
+# GrimVM #5
+# Author: Vasplayz90 • ArizNodes Team
+# License: MIT
+# Copyright: © 2026 ArizNodes Team - Reserved
 # ============================================================
-set -uo pipefail
 
-# ── Colors ───────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
+GRIM_VERSION="0.1.0"
+INSTALL_DIR="/opt/grimvm"
+DATA_DIR="${INSTALL_DIR}/data"
+BACKEND_DIR="${INSTALL_DIR}/backend"
+FRONTEND_DIR="${INSTALL_DIR}/frontend"
+DOCKER_DIR="${INSTALL_DIR}/docker"
+NGINX_DIR="${INSTALL_DIR}/nginx"
+ENV_FILE="${INSTALL_DIR}/.env"
+SERVICE_FILE="/etc/systemd/system/grimvm.service"
 
-log()  { echo -e "${GREEN}[GrimVM]${RESET} $*"; }
-warn() { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
-err()  { echo -e "${RED}[ERR]${RESET}   $*"; }
-ok()   { echo -e "${GREEN}[OK]${RESET}    $*"; }
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
 
-# ── Banner ────────────────────────────────────────────────────
-clear
-echo -e "${CYAN}${BOLD}"
-cat << 'EOF'
-  ██████╗ ██████╗ ██╗███╗   ███╗██╗   ██╗███╗   ███╗
- ██╔════╝ ██╔══██╗██║████╗ ████║██║   ██║████╗ ████║
- ██║  ███╗██████╔╝██║██╔████╔██║██║   ██║██╔████╔██║
- ██║   ██║██╔══██╗██║██║╚██╔╝██║╚██╗ ██╔╝██║╚██╔╝██║
- ╚██████╔╝██║  ██║██║██║ ╚═╝ ██║ ╚████╔╝ ██║ ╚═╝ ██║
-  ╚═════╝ ╚═╝  ╚═╝╚═╝╚═╝     ╚═╝  ╚═══╝  ╚═╝     ╚═╝
+log() {
+    echo -e "${GREEN}[GRIMVM]${NC} $1"
+}
+
+info() {
+    echo -e "${CYAN}[INFO]${NC} $1"
+}
+
+warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+die() {
+    error "$1"
+    exit 1
+}
+
+trap 'error "Installation failed at line $LINENO."' ERR
+
+clear || true
+
+cat <<'BANNER'
+============================================================
+                         GRIM VM
+                 ArizNodes Virtualization
+============================================================
+ Project      : GrimVM #5
+ Author       : Vasplayz90 • ArizNodes Team
+ License      : MIT
+ Copyright    : © 2026 ArizNodes Team - Reserved
+============================================================
+BANNER
+
+# ------------------------------------------------------------
+# Root check
+# ------------------------------------------------------------
+
+if [[ "${EUID}" -ne 0 ]]; then
+    die "Run this installer as root: sudo bash install.sh"
+fi
+
+# ------------------------------------------------------------
+# OS check
+# ------------------------------------------------------------
+
+source /etc/os-release
+
+OS_ID="${ID:-unknown}"
+OS_VERSION="${VERSION_ID:-unknown}"
+
+case "${OS_ID}" in
+    ubuntu)
+        case "${OS_VERSION}" in
+            22.04|24.04|26.04)
+                log "Supported Ubuntu version detected: ${OS_VERSION}"
+                ;;
+            *)
+                die "Unsupported Ubuntu version: ${OS_VERSION}. Use Ubuntu 22.04, 24.04 or 26.04."
+                ;;
+        esac
+        ;;
+    debian)
+        if [[ "${OS_VERSION}" != "13" ]]; then
+            die "Use Debian 13 for a supported Debian installation."
+        fi
+        log "Supported Debian version detected: ${OS_VERSION}"
+        ;;
+    *)
+        die "Unsupported operating system. Use Ubuntu or Debian 13."
+        ;;
+esac
+
+ARCH="$(dpkg --print-architecture)"
+
+if [[ "${ARCH}" != "amd64" && "${ARCH}" != "arm64" ]]; then
+    die "This installer currently supports amd64 and arm64."
+fi
+
+log "Architecture: ${ARCH}"
+
+# ------------------------------------------------------------
+# Basic packages
+# ------------------------------------------------------------
+
+log "Updating package index..."
+
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update -y
+
+apt-get install -y \
+    ca-certificates \
+    curl \
+    wget \
+    git \
+    gnupg \
+    lsb-release \
+    software-properties-common \
+    apt-transport-https \
+    nginx \
+    certbot \
+    python3 \
+    python3-venv \
+    python3-pip \
+    openssl \
+    jq \
+    unzip \
+    ufw
+
+# ------------------------------------------------------------
+# Docker
+# ------------------------------------------------------------
+
+if command -v docker >/dev/null 2>&1; then
+    log "Docker already installed."
+else
+    log "Installing Docker from the official Docker repository..."
+
+    install -m 0755 -d /etc/apt/keyrings
+
+    if [[ "${OS_ID}" == "ubuntu" ]]; then
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+            -o /etc/apt/keyrings/docker.asc
+
+        chmod a+r /etc/apt/keyrings/docker.asc
+
+        cat >/etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: ${VERSION_CODENAME}
+Components: stable
+Architectures: ${ARCH}
+Signed-By: /etc/apt/keyrings/docker.asc
 EOF
-echo -e "${RESET}"
-echo -e " ${BOLD}GrimVM Panel v2.0 — Full Auto Installer${RESET}"
-echo -e " Author: Vasplayz90 • ArizNodes Team"
-echo -e " Mode:   Cloudflare Tunnel (HTTP only, no SSL needed)"
-echo -e " ─────────────────────────────────────────────────────"
-echo ""
 
-# ── Root check ────────────────────────────────────────────────
-if [[ $EUID -ne 0 ]]; then
-  err "Run as root: sudo bash install.sh"
-  exit 1
+    else
+        curl -fsSL https://download.docker.com/linux/debian/gpg \
+            -o /etc/apt/keyrings/docker.asc
+
+        chmod a+r /etc/apt/keyrings/docker.asc
+
+        cat >/etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/debian
+Suites: ${VERSION_CODENAME}
+Components: stable
+Architectures: ${ARCH}
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+    fi
+
+    apt-get update -y
+
+    apt-get install -y \
+        docker-ce \
+        docker-ce-cli \
+        containerd.io \
+        docker-buildx-plugin \
+        docker-compose-plugin
 fi
 
-# ── Fix invoke-rc.d / policy-rc.d noise ──────────────────────
-log "Suppressing invoke-rc.d policy errors..."
-echo '#!/bin/sh
-exit 0' > /usr/sbin/policy-rc.d
-chmod +x /usr/sbin/policy-rc.d
+systemctl enable docker
+systemctl start docker
 
-# ── Detect init system ────────────────────────────────────────
-USE_SYSTEMD=false
-if pidof systemd &>/dev/null || [ "$(ps -p 1 -o comm=)" = "systemd" ]; then
-  USE_SYSTEMD=true
-  log "Init system: systemd"
-else
-  warn "Init system: SysV/container — using service commands"
-fi
+docker version >/dev/null
 
-svc_start() {
-  if $USE_SYSTEMD; then
-    systemctl enable "$1" 2>/dev/null || true
-    systemctl start  "$1" 2>/dev/null || true
-  else
-    service "$1" start 2>/dev/null || true
-  fi
-}
+log "Docker is ready."
 
-svc_reload() {
-  if $USE_SYSTEMD; then
-    systemctl reload "$1" 2>/dev/null || systemctl restart "$1" 2>/dev/null || true
-  else
-    service "$1" reload 2>/dev/null || service "$1" restart 2>/dev/null || true
-  fi
-}
+# ------------------------------------------------------------
+# Create directories
+# ------------------------------------------------------------
 
-svc_status() {
-  if $USE_SYSTEMD; then
-    systemctl is-active "$1" 2>/dev/null || echo "unknown"
-  else
-    service "$1" status 2>/dev/null | grep -q "running" && echo "active" || echo "inactive"
-  fi
-}
+log "Creating GrimVM directory structure..."
 
-# ── Hardcoded config (Cloudflare Tunnel mode) ─────────────────
-DOMAIN="hvm1.ariznodes.sryze.cc"
-ADMIN_EMAIL="admin@gmail.com"
-MYSQL_ROOT_PASS="admin"
-DB_PASS="admin"
-ADMIN_USER="admin"
-ADMIN_PASS="admin"
-ADMIN_EMAIL_ACCT="admin@gmail.com"
-DB_NAME="grimvm"
-DB_USER="grimvm_user"
-APP_DIR="/var/www/grimvm"
-APP_PORT="8080"
+mkdir -p \
+    "${INSTALL_DIR}" \
+    "${DATA_DIR}" \
+    "${BACKEND_DIR}/routes" \
+    "${FRONTEND_DIR}/css" \
+    "${FRONTEND_DIR}/js" \
+    "${DOCKER_DIR}/ubuntu" \
+    "${DOCKER_DIR}/debian" \
+    "${NGINX_DIR}" \
+    "${DATA_DIR}/backups"
 
-log "Domain:   ${DOMAIN}"
-log "App dir:  ${APP_DIR}"
-log "Mode:     Cloudflare Tunnel → localhost:${APP_PORT}"
-echo ""
+# ------------------------------------------------------------
+# Generate secrets
+# ------------------------------------------------------------
 
-# ── OS detection ──────────────────────────────────────────────
-source /etc/os-release 2>/dev/null || true
-log "OS: ${PRETTY_NAME:-Unknown}"
+if [[ ! -f "${ENV_FILE}" ]]; then
 
-# ── System update ────────────────────────────────────────────
-log "Updating system..."
-DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null || warn "apt update had warnings, continuing"
-DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq 2>/dev/null || warn "apt upgrade had warnings, continuing"
+    APP_SECRET="$(openssl rand -hex 32)"
+    DB_ROOT_PASSWORD="$(openssl rand -hex 24)"
+    DB_PASSWORD="$(openssl rand -hex 24)"
 
-# ── Base tools ───────────────────────────────────────────────
-log "Installing base tools..."
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-  curl wget git unzip tar software-properties-common \
-  apt-transport-https lsb-release ca-certificates gnupg 2>/dev/null || true
+    read -r -p "Panel domain (example: panel.example.com): " DOMAIN
 
-# ── PHP 8.2 repo ─────────────────────────────────────────────
-log "Adding PHP 8.2 repository..."
-if [[ "${ID:-}" == "ubuntu" ]]; then
-  add-apt-repository -y ppa:ondrej/php 2>/dev/null || warn "PPA add had warnings"
-elif [[ "${ID:-}" == "debian" ]]; then
-  wget -qO /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg 2>/dev/null || true
-  echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" \
-    > /etc/apt/sources.list.d/php.list
-fi
-apt-get update -qq 2>/dev/null || true
+    if [[ -z "${DOMAIN}" ]]; then
+        DOMAIN="localhost"
+    fi
 
-# ── Install PHP 8.2 ──────────────────────────────────────────
-log "Installing PHP 8.2..."
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-  php8.2 php8.2-fpm php8.2-mysql php8.2-mbstring \
-  php8.2-xml php8.2-curl php8.2-zip php8.2-bcmath \
-  php8.2-gd php8.2-cli php8.2-redis php8.2-intl 2>/dev/null || {
-  warn "php8.2-redis failed, trying pecl..."
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    php8.2 php8.2-fpm php8.2-mysql php8.2-mbstring \
-    php8.2-xml php8.2-curl php8.2-zip php8.2-bcmath \
-    php8.2-gd php8.2-cli php8.2-intl 2>/dev/null || true
-}
+    read -r -p "Admin username [admin]: " ADMIN_USERNAME
+    ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
 
-# ── Install Nginx ────────────────────────────────────────────
-log "Installing Nginx..."
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx 2>/dev/null || true
-svc_start nginx
+    while true; do
+        read -r -s -p "Admin password: " ADMIN_PASSWORD
+        echo
 
-# ── Install MySQL ────────────────────────────────────────────
-log "Installing MySQL..."
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mysql-server 2>/dev/null || true
-svc_start mysql
+        if [[ ${#ADMIN_PASSWORD} -lt 8 ]]; then
+            warn "Password must contain at least 8 characters."
+            continue
+        fi
 
-# Wait for MySQL socket
-log "Waiting for MySQL to be ready..."
-for i in {1..30}; do
-  if mysqladmin ping --silent 2>/dev/null; then
-    ok "MySQL is ready"
-    break
-  fi
-  sleep 1
-done
+        read -r -s -p "Confirm admin password: " ADMIN_PASSWORD_CONFIRM
+        echo
 
-# ── Install Redis ─────────────────────────────────────────────
-log "Installing Redis..."
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq redis-server 2>/dev/null || true
+        if [[ "${ADMIN_PASSWORD}" != "${ADMIN_PASSWORD_CONFIRM}" ]]; then
+            warn "Passwords do not match."
+            continue
+        fi
 
-# Start Redis — try multiple methods
-svc_start redis-server 2>/dev/null || true
-if ! redis-cli ping &>/dev/null; then
-  warn "Redis service start failed, launching directly..."
-  mkdir -p /var/log/redis /var/run/redis
-  redis-server \
-    --daemonize yes \
-    --logfile /var/log/redis/redis-server.log \
-    --pidfile /var/run/redis/redis-server.pid \
-    --bind 127.0.0.1 \
-    --port 6379 2>/dev/null || true
-  sleep 2
-fi
+        break
+    done
 
-if redis-cli ping &>/dev/null; then
-  ok "Redis is running"
-else
-  warn "Redis could not start — sessions will fall back to files"
-  # Patch .env to use file sessions later
-  REDIS_FALLBACK=true
-fi
-REDIS_FALLBACK=${REDIS_FALLBACK:-false}
+    read -r -p "Admin email: " ADMIN_EMAIL
 
-# ── Install Docker ────────────────────────────────────────────
-log "Installing Docker..."
-if ! command -v docker &>/dev/null; then
-  curl -fsSL https://get.docker.com | bash 2>/dev/null || \
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io 2>/dev/null || true
-fi
-svc_start docker
-usermod -aG docker www-data 2>/dev/null || true
+    cat >"${ENV_FILE}" <<EOF
+GRIM_VERSION=${GRIM_VERSION}
 
-# ── Install Composer ──────────────────────────────────────────
-log "Installing Composer..."
-if ! command -v composer &>/dev/null; then
-  curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer 2>/dev/null || true
-fi
+GRIM_DOMAIN=${DOMAIN}
 
-# ── Verify PHP-FPM sock ───────────────────────────────────────
-log "Starting PHP-FPM..."
-svc_start php8.2-fpm 2>/dev/null || true
-# If sock doesn't exist, start directly
-if [[ ! -S /run/php/php8.2-fpm.sock ]]; then
-  warn "FPM sock missing, starting directly..."
-  php-fpm8.2 -D 2>/dev/null || true
-  sleep 2
-fi
-
-if [[ -S /run/php/php8.2-fpm.sock ]]; then
-  ok "PHP-FPM socket ready"
-else
-  warn "PHP-FPM socket still missing — check php8.2-fpm install"
-fi
-
-# ── MySQL hardening + DB setup ────────────────────────────────
-log "Configuring MySQL..."
-# Try auth with no password first (fresh install), then with password
-mysql -u root --connect-expired-password 2>/dev/null <<SQL || \
-mysql -u root -p"${MYSQL_ROOT_PASS}" 2>/dev/null <<SQL || true
-ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ROOT_PASS}';
-CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;
-CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
-GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';
-FLUSH PRIVILEGES;
-SQL
-
-# ── App directory structure ───────────────────────────────────
-log "Creating application structure..."
-mkdir -p "${APP_DIR}"/{public,app,config,storage,routes,resources,database,scripts,docker}
-mkdir -p "${APP_DIR}"/storage/{logs,sessions,cache,backups}
-mkdir -p "${APP_DIR}"/public/{css,js,img,fonts}
-mkdir -p "${APP_DIR}"/app/{Controllers,Models,Middleware,Services}
-mkdir -p "${APP_DIR}"/resources/views
-
-# ── .env ──────────────────────────────────────────────────────
-log "Writing .env..."
-APP_SECRET=$(openssl rand -hex 32)
-
-if $REDIS_FALLBACK; then
-  SESSION_DRV="file"
-  CACHE_DRV="file"
-else
-  SESSION_DRV="redis"
-  CACHE_DRV="redis"
-fi
-
-cat > "${APP_DIR}/.env" <<ENV
-APP_NAME=GrimVM
-APP_ENV=production
-APP_URL=https://${DOMAIN}
 APP_SECRET=${APP_SECRET}
 
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_DATABASE=${DB_NAME}
-DB_USERNAME=${DB_USER}
-DB_PASSWORD=${DB_PASS}
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3307
+MYSQL_DATABASE=grimvm
+MYSQL_USER=grimvm
+MYSQL_PASSWORD=${DB_PASSWORD}
+MYSQL_ROOT_PASSWORD=${DB_ROOT_PASSWORD}
 
-REDIS_HOST=127.0.0.1
-REDIS_PORT=6379
+ADMIN_USERNAME=${ADMIN_USERNAME}
+ADMIN_PASSWORD=${ADMIN_PASSWORD}
+ADMIN_EMAIL=${ADMIN_EMAIL}
 
-SESSION_DRIVER=${SESSION_DRV}
-CACHE_DRIVER=${CACHE_DRV}
+GRIM_VPS_NETWORK=grimvm_vps
+EOF
 
-ADMIN_EMAIL=${ADMIN_EMAIL_ACCT}
-ADMIN_USER=${ADMIN_USER}
+    chmod 600 "${ENV_FILE}"
 
-DOCKER_SOCKET=/var/run/docker.sock
-TMATE_SERVER=ssh.tmate.io
-
-MAX_VPS_PER_NODE=50
-VPS_DELETE_DAILY_LIMIT=20
-ENV
-
-# ── composer.json ─────────────────────────────────────────────
-cat > "${APP_DIR}/composer.json" <<'JSON'
-{
-  "name": "ariz/grimvm",
-  "description": "GrimVM Hypervisor Panel",
-  "version": "1.0.0",
-  "license": "MIT",
-  "require": {
-    "php": ">=8.2",
-    "ext-pdo": "*",
-    "ext-json": "*",
-    "slim/slim": "^4.12",
-    "slim/psr7": "^1.6",
-    "php-di/php-di": "^7.0",
-    "vlucas/phpdotenv": "^5.5",
-    "firebase/php-jwt": "^6.9",
-    "respect/validation": "^2.3",
-    "monolog/monolog": "^3.4",
-    "phpmailer/phpmailer": "^6.8"
-  },
-  "autoload": {
-    "psr-4": {
-      "GrimVM\\": "app/"
-    }
-  }
-}
-JSON
-
-# ── Database schema ───────────────────────────────────────────
-log "Writing database schema..."
-cat > "${APP_DIR}/database/schema.sql" <<'SQL'
-SET FOREIGN_KEY_CHECKS=0;
-
-CREATE TABLE IF NOT EXISTS `users` (
-  `id`           BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  `username`     VARCHAR(64) UNIQUE NOT NULL,
-  `email`        VARCHAR(255) UNIQUE NOT NULL,
-  `password`     VARCHAR(255) NOT NULL,
-  `role`         ENUM('owner','admin','member') DEFAULT 'member',
-  `rank`         ENUM('Newbie','Pro','Ultimate') DEFAULT 'Newbie',
-  `vps_count`    INT DEFAULT 0,
-  `banned`       TINYINT DEFAULT 0,
-  `ban_reason`   TEXT,
-  `ban_ip`       VARCHAR(64),
-  `muted_until`  DATETIME,
-  `api_token`    VARCHAR(128),
-  `created_at`   DATETIME DEFAULT CURRENT_TIMESTAMP,
-  `updated_at`   DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE IF NOT EXISTS `nodes` (
-  `id`         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  `name`       VARCHAR(128) NOT NULL,
-  `location`   VARCHAR(128) NOT NULL,
-  `ip`         VARCHAR(64) NOT NULL,
-  `port`       INT DEFAULT 2222,
-  `memory_mb`  INT NOT NULL,
-  `disk_gb`    INT NOT NULL,
-  `cpu_cores`  INT NOT NULL,
-  `active`     TINYINT DEFAULT 1,
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE IF NOT EXISTS `vps` (
-  `id`            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  `uuid`          CHAR(36) UNIQUE NOT NULL,
-  `name`          VARCHAR(128) NOT NULL,
-  `owner_id`      BIGINT UNSIGNED NOT NULL,
-  `node_id`       BIGINT UNSIGNED NOT NULL,
-  `container_id`  VARCHAR(128),
-  `image`         VARCHAR(255) NOT NULL,
-  `memory_mb`     INT NOT NULL,
-  `disk_gb`       INT NOT NULL,
-  `cpu_cores`     INT NOT NULL,
-  `status`        ENUM('running','stopped','suspended','deleted') DEFAULT 'stopped',
-  `tmate_session` VARCHAR(255),
-  `sftp_port`     INT,
-  `console_port`  INT,
-  `created_at`    DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (`owner_id`) REFERENCES `users`(`id`),
-  FOREIGN KEY (`node_id`)  REFERENCES `nodes`(`id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE IF NOT EXISTS `eggs` (
-  `id`           BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  `name`         VARCHAR(128) NOT NULL,
-  `docker_image` VARCHAR(255) NOT NULL,
-  `startup_cmd`  TEXT,
-  `env_vars`     JSON,
-  `description`  TEXT,
-  `author`       VARCHAR(128),
-  `active`       TINYINT DEFAULT 1,
-  `created_at`   DATETIME DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE IF NOT EXISTS `mounts` (
-  `id`         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  `name`       VARCHAR(128) NOT NULL,
-  `source`     VARCHAR(512) NOT NULL,
-  `target`     VARCHAR(512) NOT NULL,
-  `read_only`  TINYINT DEFAULT 0,
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE IF NOT EXISTS `vps_mounts` (
-  `vps_id`   BIGINT UNSIGNED,
-  `mount_id` BIGINT UNSIGNED,
-  PRIMARY KEY(`vps_id`,`mount_id`),
-  FOREIGN KEY(`vps_id`)   REFERENCES `vps`(`id`),
-  FOREIGN KEY(`mount_id`) REFERENCES `mounts`(`id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE IF NOT EXISTS `audit_log` (
-  `id`         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  `user_id`    BIGINT UNSIGNED,
-  `action`     VARCHAR(128) NOT NULL,
-  `target`     VARCHAR(255),
-  `ip`         VARCHAR(64),
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY(`user_id`) REFERENCES `users`(`id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE IF NOT EXISTS `delete_log` (
-  `id`         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  `admin_id`   BIGINT UNSIGNED,
-  `vps_uuid`   CHAR(36),
-  `deleted_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY(`admin_id`) REFERENCES `users`(`id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE IF NOT EXISTS `rewards` (
-  `id`          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  `name`        VARCHAR(128) NOT NULL,
-  `description` TEXT,
-  `rank_req`    ENUM('Pro','Ultimate') NOT NULL,
-  `code`        VARCHAR(64) UNIQUE,
-  `claimed_by`  BIGINT UNSIGNED,
-  `claimed_at`  DATETIME,
-  FOREIGN KEY(`claimed_by`) REFERENCES `users`(`id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE IF NOT EXISTS `settings` (
-  `key`   VARCHAR(128) PRIMARY KEY,
-  `value` TEXT
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-INSERT IGNORE INTO `settings` (`key`,`value`) VALUES
-  ('panel_name','GrimVM'),
-  ('max_vps_per_node','50'),
-  ('vps_delete_daily_limit','20'),
-  ('registration_open','1'),
-  ('maintenance_mode','0');
-
-SET FOREIGN_KEY_CHECKS=1;
-SQL
-
-# Load schema
-log "Loading database schema..."
-mysql -u root -p"${MYSQL_ROOT_PASS}" "${DB_NAME}" < "${APP_DIR}/database/schema.sql" 2>/dev/null || \
-mysql -u "${DB_USER}" -p"${DB_PASS}" "${DB_NAME}" < "${APP_DIR}/database/schema.sql" 2>/dev/null || \
-warn "Schema load had warnings — tables may already exist"
-
-# ── Seed data ─────────────────────────────────────────────────
-log "Seeding admin account..."
-HASHED=$(php -r "echo password_hash('${ADMIN_PASS}', PASSWORD_BCRYPT, ['cost'=>12]);")
-
-mysql -u root -p"${MYSQL_ROOT_PASS}" "${DB_NAME}" 2>/dev/null <<SQL || true
-INSERT INTO users (username, email, password, role, rank)
-VALUES ('${ADMIN_USER}', '${ADMIN_EMAIL_ACCT}', '${HASHED}', 'owner', 'Ultimate')
-ON DUPLICATE KEY UPDATE role='owner', rank='Ultimate';
-
-INSERT IGNORE INTO nodes (name, location, ip, port, memory_mb, disk_gb, cpu_cores)
-VALUES ('Node-01', 'US-East', '127.0.0.1', 2222, 8192, 100, 4);
-
-INSERT IGNORE INTO eggs (name, docker_image, startup_cmd, description, author) VALUES
-  ('Ubuntu 22.04',   'ubuntu:22.04',         '/bin/bash', 'Ubuntu 22.04 LTS', 'ArizNodes'),
-  ('Debian 12',      'debian:12',             '/bin/bash', 'Debian Bookworm',  'ArizNodes'),
-  ('Alpine Linux',   'alpine:3.19',           '/bin/sh',   'Alpine Linux',     'ArizNodes'),
-  ('Node.js 20',     'node:20-alpine',        'node',      'Node.js 20 LTS',   'ArizNodes'),
-  ('Python 3.12',    'python:3.12-slim',      'python3',   'Python 3.12',      'ArizNodes'),
-  ('Minecraft Java', 'itzg/minecraft-server', '',          'Minecraft Java',   'ArizNodes');
-SQL
-
-# ── PHP-FPM pool config ───────────────────────────────────────
-log "Configuring PHP-FPM pool..."
-mkdir -p /etc/php/8.2/fpm/pool.d
-cat > /etc/php/8.2/fpm/pool.d/grimvm.conf <<INI
-[grimvm]
-user = www-data
-group = www-data
-listen = /run/php/php8.2-fpm.sock
-listen.owner = www-data
-listen.group = www-data
-listen.mode = 0660
-pm = dynamic
-pm.max_children = 20
-pm.start_servers = 3
-pm.min_spare_servers = 2
-pm.max_spare_servers = 8
-pm.max_requests = 500
-php_admin_value[error_log] = ${APP_DIR}/storage/logs/php-fpm.log
-php_admin_flag[log_errors] = on
-php_value[upload_max_filesize] = 64M
-php_value[post_max_size] = 64M
-php_value[memory_limit] = 256M
-INI
-
-svc_reload php8.2-fpm 2>/dev/null || php-fpm8.2 -D 2>/dev/null || true
-sleep 1
-
-# ── Nginx config — HTTP only (Cloudflare Tunnel handles TLS) ──
-log "Writing Nginx config (Cloudflare Tunnel mode — HTTP only)..."
-cat > /etc/nginx/sites-available/grimvm <<NGINX
-server {
-    listen ${APP_PORT};
-    server_name _;
-
-    root ${APP_DIR}/public;
-    index index.php index.html;
-
-    client_max_body_size 64M;
-
-    # Trust Cloudflare IPs for real IP forwarding
-    set_real_ip_from 103.21.244.0/22;
-    set_real_ip_from 103.22.200.0/22;
-    set_real_ip_from 103.31.4.0/22;
-    set_real_ip_from 104.16.0.0/13;
-    set_real_ip_from 104.24.0.0/14;
-    set_real_ip_from 108.162.192.0/18;
-    set_real_ip_from 131.0.72.0/22;
-    set_real_ip_from 141.101.64.0/18;
-    set_real_ip_from 162.158.0.0/15;
-    set_real_ip_from 172.64.0.0/13;
-    set_real_ip_from 173.245.48.0/20;
-    set_real_ip_from 188.114.96.0/20;
-    set_real_ip_from 190.93.240.0/20;
-    set_real_ip_from 197.234.240.0/22;
-    set_real_ip_from 198.41.128.0/17;
-    real_ip_header CF-Connecting-IP;
-
-    # Security headers
-    add_header X-Frame-Options DENY always;
-    add_header X-Content-Type-Options nosniff always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    add_header Referrer-Policy strict-origin-when-cross-origin always;
-
-    location /api {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
-
-    location ~ \.php\$ {
-        try_files \$uri =404;
-        fastcgi_split_path_info ^(.+\.php)(/.+)\$;
-        fastcgi_pass unix:/run/php/php8.2-fpm.sock;
-        fastcgi_index index.php;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        fastcgi_param HTTP_SCHEME https;
-        fastcgi_param HTTPS on;
-        include fastcgi_params;
-        fastcgi_read_timeout 300;
-        fastcgi_buffer_size 128k;
-        fastcgi_buffers 4 256k;
-    }
-
-    location / {
-        try_files \$uri \$uri/ /index.html;
-    }
-
-    location ~ /\.env  { deny all; return 404; }
-    location ~ /\.git  { deny all; return 404; }
-    location ~ /vendor { deny all; return 404; }
-
-    access_log ${APP_DIR}/storage/logs/nginx_access.log;
-    error_log  ${APP_DIR}/storage/logs/nginx_error.log;
-}
-NGINX
-
-ln -sf /etc/nginx/sites-available/grimvm /etc/nginx/sites-enabled/grimvm
-rm -f /etc/nginx/sites-enabled/default
-
-# Test nginx config
-if nginx -t 2>/dev/null; then
-  ok "Nginx config valid"
-  svc_reload nginx
 else
-  err "Nginx config test failed — check /etc/nginx/sites-available/grimvm"
+    log "Existing GrimVM environment detected."
 fi
 
-# ── Write all PHP application files ───────────────────────────
-log "Writing application files..."
+# shellcheck disable=SC1090
+source "${ENV_FILE}"
 
-# public/index.php
-cat > "${APP_DIR}/public/index.php" <<'PHP'
-<?php
-declare(strict_types=1);
+# ------------------------------------------------------------
+# Docker network
+# ------------------------------------------------------------
 
-define('GRIMVM_ROOT', dirname(__DIR__));
-define('GRIMVM_VERSION', '2.0.0');
+if ! docker network inspect "${GRIM_VPS_NETWORK}" >/dev/null 2>&1; then
+    log "Creating GrimVM VPS network..."
+    docker network create "${GRIM_VPS_NETWORK}"
+fi
 
-// Show errors in dev, hide in prod
-if (getenv('APP_ENV') !== 'production') {
-    ini_set('display_errors', '1');
-    error_reporting(E_ALL);
-}
+# ------------------------------------------------------------
+# MySQL Docker Compose
+# ------------------------------------------------------------
 
-$autoload = GRIMVM_ROOT . '/vendor/autoload.php';
-if (!file_exists($autoload)) {
-    http_response_code(503);
-    echo json_encode(['error' => 'Dependencies not installed. Run: composer install']);
-    exit;
-}
+log "Creating MySQL configuration..."
 
-require $autoload;
+cat >"${INSTALL_DIR}/docker-compose.yml" <<EOF
+services:
 
-use DI\ContainerBuilder;
-use Slim\Factory\AppFactory;
-use GrimVM\Middleware\SessionMiddleware;
-use GrimVM\Middleware\RateLimitMiddleware;
+  mysql:
+    image: mysql:8.4
+    container_name: grimvm_mysql
+    restart: unless-stopped
 
-$dotenv = Dotenv\Dotenv::createImmutable(GRIMVM_ROOT);
-$dotenv->safeLoad();
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD}"
+      MYSQL_DATABASE: "${MYSQL_DATABASE}"
+      MYSQL_USER: "${MYSQL_USER}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD}"
 
-$builder = new ContainerBuilder();
-$builder->addDefinitions(GRIMVM_ROOT . '/config/container.php');
+    ports:
+      - "127.0.0.1:${MYSQL_PORT}:3306"
 
-try {
-    $container = $builder->build();
-} catch (Exception $e) {
-    http_response_code(503);
-    echo json_encode(['error' => 'Container build failed: ' . $e->getMessage()]);
-    exit;
-}
+    volumes:
+      - grimvm_mysql:/var/lib/mysql
 
-AppFactory::setContainer($container);
-$app = AppFactory::create();
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
 
-$errorMiddleware = $app->addErrorMiddleware(true, true, true);
-$errorMiddleware->getDefaultErrorHandler()->forceContentType('application/json');
+volumes:
+  grimvm_mysql:
+EOF
 
-$app->add(new SessionMiddleware());
+docker compose -f "${INSTALL_DIR}/docker-compose.yml" up -d
 
-try {
-    $redis = $container->get('redis');
-    $app->add(new RateLimitMiddleware($redis));
-} catch (Exception $e) {
-    // Redis unavailable — skip rate limiting, don't crash
-}
+log "Waiting for MySQL..."
 
-require GRIMVM_ROOT . '/routes/web.php';
-require GRIMVM_ROOT . '/routes/api.php';
-require GRIMVM_ROOT . '/routes/admin.php';
+for i in {1..60}; do
+    if docker exec grimvm_mysql \
+        mysqladmin ping \
+        -h 127.0.0.1 \
+        -u root \
+        "-p${MYSQL_ROOT_PASSWORD}" \
+        --silent >/dev/null 2>&1; then
+        break
+    fi
 
-$app->run();
-PHP
+    sleep 2
+done
 
-# config/container.php
-cat > "${APP_DIR}/config/container.php" <<'PHP'
-<?php
-declare(strict_types=1);
+if ! docker exec grimvm_mysql \
+    mysqladmin ping \
+    -h 127.0.0.1 \
+    -u root \
+    "-p${MYSQL_ROOT_PASSWORD}" \
+    --silent >/dev/null 2>&1; then
+    die "MySQL failed to start."
+fi
 
-use GrimVM\Services\DatabaseService;
-use GrimVM\Services\DockerService;
-use GrimVM\Services\TmateService;
-use GrimVM\Services\RankService;
-use GrimVM\Services\AuditService;
-use Monolog\Logger;
-use Monolog\Handler\StreamHandler;
+log "MySQL is ready."
 
-return [
-    'db' => function () {
-        return new DatabaseService(
-            $_ENV['DB_HOST']     ?? '127.0.0.1',
-            $_ENV['DB_DATABASE'] ?? 'grimvm',
-            $_ENV['DB_USERNAME'] ?? 'grimvm_user',
-            $_ENV['DB_PASSWORD'] ?? 'admin'
-        );
-    },
-    'docker' => function () {
-        return new DockerService($_ENV['DOCKER_SOCKET'] ?? '/var/run/docker.sock');
-    },
-    'tmate' => function () {
-        return new TmateService($_ENV['TMATE_SERVER'] ?? 'ssh.tmate.io');
-    },
-    'rank' => function ($c) {
-        return new RankService($c->get('db'));
-    },
-    'audit' => function ($c) {
-        return new AuditService($c->get('db'));
-    },
-    'redis' => function () {
-        $r = new Redis();
-        $connected = @$r->connect(
-            $_ENV['REDIS_HOST'] ?? '127.0.0.1',
-            (int)($_ENV['REDIS_PORT'] ?? 6379),
-            2.0
-        );
-        if (!$connected) {
-            throw new RuntimeException('Redis connection failed');
+# ------------------------------------------------------------
+# Python requirements
+# ------------------------------------------------------------
+
+log "Creating Python virtual environment..."
+
+python3 -m venv "${BACKEND_DIR}/venv"
+
+"${BACKEND_DIR}/venv/bin/pip" install --upgrade pip
+
+cat >"${BACKEND_DIR}/requirements.txt" <<'EOF'
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+SQLAlchemy==2.0.43
+PyMySQL==1.1.1
+PyJWT==2.10.1
+docker==7.1.0
+python-multipart==0.0.20
+email-validator==2.2.0
+EOF
+
+"${BACKEND_DIR}/venv/bin/pip" install -r "${BACKEND_DIR}/requirements.txt"
+
+# ------------------------------------------------------------
+# Database
+# ------------------------------------------------------------
+
+cat >"${BACKEND_DIR}/database.py" <<'PY'
+import os
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3307")
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "grimvm")
+MYSQL_USER = os.getenv("MYSQL_USER", "grimvm")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+
+DATABASE_URL = (
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}"
+    f"@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}"
+)
+
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=280,
+)
+
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+)
+
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+PY
+
+# ------------------------------------------------------------
+# Models
+# ------------------------------------------------------------
+
+cat >"${BACKEND_DIR}/models.py" <<'PY'
+from datetime import datetime
+
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+)
+
+from sqlalchemy.orm import Mapped, mapped_column
+
+from database import Base
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    username: Mapped[str] = mapped_column(
+        String(64),
+        unique=True,
+        nullable=False,
+    )
+
+    email: Mapped[str] = mapped_column(
+        String(255),
+        unique=True,
+        nullable=False,
+    )
+
+    password_hash: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+
+    role: Mapped[str] = mapped_column(
+        String(32),
+        default="user",
+        nullable=False,
+    )
+
+    rank: Mapped[str] = mapped_column(
+        String(32),
+        default="newbie",
+        nullable=False,
+    )
+
+    banned: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+
+class VPS(Base):
+    __tablename__ = "vps"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+    )
+
+    uuid: Mapped[str] = mapped_column(
+        String(64),
+        unique=True,
+        nullable=False,
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+    )
+
+    owner_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=False,
+    )
+
+    node: Mapped[str] = mapped_column(
+        String(128),
+        default="node-1",
+        nullable=False,
+    )
+
+    image: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+
+    container_id: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+
+    cpu: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        nullable=False,
+    )
+
+    ram_mb: Mapped[int] = mapped_column(
+        Integer,
+        default=1024,
+        nullable=False,
+    )
+
+    disk_gb: Mapped[int] = mapped_column(
+        Integer,
+        default=10,
+        nullable=False,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(32),
+        default="stopped",
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+    )
+
+    actor_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    action: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+    )
+
+    target: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    details: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+PY
+
+# ------------------------------------------------------------
+# Authentication helpers
+# ------------------------------------------------------------
+
+cat >"${BACKEND_DIR}/security.py" <<'PY'
+import hashlib
+import hmac
+import os
+
+import jwt
+
+
+SECRET = os.getenv("APP_SECRET", "")
+ALGORITHM = "HS256"
+
+
+def hash_password(password: str) -> str:
+    salt = os.urandom(16)
+
+    derived = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode(),
+        salt,
+        310000,
+    )
+
+    return (
+        "pbkdf2_sha256$310000$"
+        + salt.hex()
+        + "$"
+        + derived.hex()
+    )
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        method, iterations, salt_hex, hash_hex = stored.split("$")
+
+        if method != "pbkdf2_sha256":
+            return False
+
+        derived = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode(),
+            bytes.fromhex(salt_hex),
+            int(iterations),
+        )
+
+        return hmac.compare_digest(
+            derived.hex(),
+            hash_hex,
+        )
+
+    except Exception:
+        return False
+
+
+def create_token(user_id: int) -> str:
+    return jwt.encode(
+        {
+            "user_id": user_id,
+        },
+        SECRET,
+        algorithm=ALGORITHM,
+    )
+
+
+def decode_token(token: str) -> dict:
+    return jwt.decode(
+        token,
+        SECRET,
+        algorithms=[ALGORITHM],
+    )
+PY
+
+# ------------------------------------------------------------
+# Docker manager
+# ------------------------------------------------------------
+
+cat >"${BACKEND_DIR}/docker_manager.py" <<'PY'
+import os
+import uuid
+
+import docker
+
+
+NETWORK_NAME = os.getenv(
+    "GRIM_VPS_NETWORK",
+    "grimvm_vps",
+)
+
+client = docker.from_env()
+
+
+def ensure_network():
+    try:
+        client.networks.get(NETWORK_NAME)
+    except docker.errors.NotFound:
+        client.networks.create(
+            NETWORK_NAME,
+            driver="bridge",
+        )
+
+
+def create_vps(
+    name: str,
+    image: str,
+    cpu: int,
+    ram_mb: int,
+    disk_gb: int,
+):
+    ensure_network()
+
+    vps_uuid = str(uuid.uuid4())
+
+    container_name = (
+        "grimvm_"
+        + vps_uuid.replace("-", "")[:16]
+    )
+
+    mem_limit = f"{ram_mb}m"
+
+    nano_cpus = cpu * 1_000_000_000
+
+    container = client.containers.run(
+        image=image,
+        name=container_name,
+        hostname=name,
+        command=[
+            "/bin/bash",
+            "-c",
+            "while true; do sleep 3600; done",
+        ],
+        detach=True,
+        stdin_open=True,
+        tty=True,
+        mem_limit=mem_limit,
+        nano_cpus=nano_cpus,
+        network=NETWORK_NAME,
+        restart_policy={
+            "Name": "unless-stopped"
+        },
+        labels={
+            "com.ariznodes.grimvm": "true",
+            "com.ariznodes.grimvm.uuid": vps_uuid,
+        },
+    )
+
+    return {
+        "uuid": vps_uuid,
+        "container_id": container.id,
+        "container_name": container_name,
+    }
+
+
+def start(container_id: str):
+    client.containers.get(container_id).start()
+
+
+def stop(container_id: str):
+    client.containers.get(container_id).stop()
+
+
+def restart(container_id: str):
+    client.containers.get(container_id).restart()
+
+
+def remove(container_id: str):
+    container = client.containers.get(container_id)
+
+    container.remove(
+        force=True,
+    )
+
+
+def status(container_id: str):
+    container = client.containers.get(container_id)
+
+    container.reload()
+
+    return container.status
+PY
+
+# ------------------------------------------------------------
+# FastAPI application
+# ------------------------------------------------------------
+
+cat >"${BACKEND_DIR}/app.py" <<'PY'
+import os
+from pathlib import Path
+
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+)
+
+from fastapi.middleware.cors import CORSMiddleware
+
+from pydantic import BaseModel
+
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from database import Base, engine, get_db
+from docker_manager import (
+    create_vps,
+    restart,
+    start,
+    status,
+    stop,
+    remove,
+)
+from models import AuditLog, User, VPS
+from security import (
+    create_token,
+    decode_token,
+    hash_password,
+    verify_password,
+)
+
+
+app = FastAPI(
+    title="GrimVM API",
+    version=os.getenv(
+        "GRIM_VERSION",
+        "0.1.0",
+    ),
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+Base.metadata.create_all(bind=engine)
+
+
+class RegisterRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class CreateVPSRequest(BaseModel):
+    owner_id: int
+    name: str
+    image: str = "ubuntu:24.04"
+    cpu: int = 1
+    ram_mb: int = 1024
+    disk_gb: int = 10
+
+
+def current_user(
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    if not authorization:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing authorization token",
+        )
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authorization header",
+        )
+
+    token = authorization[7:]
+
+    try:
+        payload = decode_token(token)
+        user_id = int(payload["user_id"])
+    except Exception:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token",
+        )
+
+    user = db.get(User, user_id)
+
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="User not found",
+        )
+
+    if user.banned:
+        raise HTTPException(
+            status_code=403,
+            detail="Account banned",
+        )
+
+    return user
+
+
+def admin_required(
+    user=Depends(current_user),
+):
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Administrator access required",
+        )
+
+    return user
+
+
+def write_audit(
+    db: Session,
+    actor_id: int | None,
+    action: str,
+    target: str | None = None,
+    details: str | None = None,
+):
+    db.add(
+        AuditLog(
+            actor_id=actor_id,
+            action=action,
+            target=target,
+            details=details,
+        )
+    )
+
+    db.commit()
+
+
+@app.get("/api/health")
+def health():
+    return {
+        "status": "online",
+        "name": "GrimVM",
+        "version": os.getenv(
+            "GRIM_VERSION",
+            "0.1.0",
+        ),
+    }
+
+
+@app.post("/api/auth/register")
+def register(
+    request: RegisterRequest,
+    db: Session = Depends(get_db),
+):
+    username = request.username.strip()
+    email = request.email.strip().lower()
+
+    if len(username) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail="Username must contain at least 3 characters",
+        )
+
+    if len(request.password) < 8:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must contain at least 8 characters",
+        )
+
+    if db.query(User).filter(
+        func.lower(User.username) == username.lower()
+    ).first():
+        raise HTTPException(
+            status_code=409,
+            detail="Username already exists",
+        )
+
+    if db.query(User).filter(
+        func.lower(User.email) == email.lower()
+    ).first():
+        raise HTTPException(
+            status_code=409,
+            detail="Email already exists",
+        )
+
+    user = User(
+        username=username,
+        email=email,
+        password_hash=hash_password(
+            request.password
+        ),
+        role="user",
+        rank="newbie",
+    )
+
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    write_audit(
+        db,
+        user.id,
+        "REGISTER",
+        f"user:{user.id}",
+    )
+
+    return {
+        "message": "Account created",
+        "user_id": user.id,
+    }
+
+
+@app.post("/api/auth/login")
+def login(
+    request: LoginRequest,
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(
+        func.lower(User.username)
+        == request.username.lower()
+    ).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid username or password",
+        )
+
+    if user.banned:
+        raise HTTPException(
+            status_code=403,
+            detail="Account banned",
+        )
+
+    if not verify_password(
+        request.password,
+        user.password_hash,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid username or password",
+        )
+
+    token = create_token(user.id)
+
+    return {
+        "token": token,
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "role": user.role,
+            "rank": user.rank,
+        },
+    }
+
+
+@app.get("/api/me")
+def me(
+    user=Depends(current_user),
+):
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "role": user.role,
+        "rank": user.rank,
+    }
+
+
+@app.get("/api/vps")
+def list_vps(
+    user=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    if user.role == "admin":
+        vps_list = db.query(VPS).all()
+    else:
+        vps_list = db.query(VPS).filter(
+            VPS.owner_id == user.id
+        ).all()
+
+    results = []
+
+    for item in vps_list:
+
+        live_status = item.status
+
+        if item.container_id:
+            try:
+                live_status = status(
+                    item.container_id
+                )
+            except Exception:
+                live_status = "unknown"
+
+        results.append({
+            "id": item.id,
+            "uuid": item.uuid,
+            "name": item.name,
+            "owner_id": item.owner_id,
+            "node": item.node,
+            "image": item.image,
+            "cpu": item.cpu,
+            "ram_mb": item.ram_mb,
+            "disk_gb": item.disk_gb,
+            "status": live_status,
+            "created_at": item.created_at.isoformat(),
+        })
+
+    return results
+
+
+@app.post("/api/admin/vps")
+def create_admin_vps(
+    request: CreateVPSRequest,
+    admin=Depends(admin_required),
+    db: Session = Depends(get_db),
+):
+    owner = db.get(User, request.owner_id)
+
+    if not owner:
+        raise HTTPException(
+            status_code=404,
+            detail="Owner user does not exist",
+        )
+
+    if request.cpu < 1 or request.cpu > 32:
+        raise HTTPException(
+            status_code=400,
+            detail="CPU must be between 1 and 32",
+        )
+
+    if request.ram_mb < 256 or request.ram_mb > 131072:
+        raise HTTPException(
+            status_code=400,
+            detail="RAM must be between 256 and 131072 MB",
+        )
+
+    if request.disk_gb < 1 or request.disk_gb > 2048:
+        raise HTTPException(
+            status_code=400,
+            detail="Disk must be between 1 and 2048 GB",
+        )
+
+    allowed_images = {
+        "ubuntu:24.04",
+        "ubuntu:22.04",
+        "debian:13",
+        "debian:12",
+        "alpine:latest",
+    }
+
+    if request.image not in allowed_images:
+        raise HTTPException(
+            status_code=400,
+            detail="Image not allowed",
+        )
+
+    owner_vps_count = db.query(VPS).filter(
+        VPS.owner_id == owner.id
+    ).count()
+
+    if owner.rank == "newbie":
+        max_vps = 2
+    elif owner.rank == "pro":
+        max_vps = 4
+    else:
+        max_vps = 10
+
+    if owner_vps_count >= max_vps:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"User rank {owner.rank} "
+                f"allows a maximum of {max_vps} VPS"
+            ),
+        )
+
+    try:
+        created = create_vps(
+            name=request.name,
+            image=request.image,
+            cpu=request.cpu,
+            ram_mb=request.ram_mb,
+            disk_gb=request.disk_gb,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Docker creation failed: {exc}",
+        )
+
+    vps = VPS(
+        uuid=created["uuid"],
+        name=request.name,
+        owner_id=owner.id,
+        node="node-1",
+        image=request.image,
+        container_id=created["container_id"],
+        cpu=request.cpu,
+        ram_mb=request.ram_mb,
+        disk_gb=request.disk_gb,
+        status="running",
+    )
+
+    db.add(vps)
+    db.commit()
+    db.refresh(vps)
+
+    write_audit(
+        db,
+        admin.id,
+        "CREATE_VPS",
+        f"vps:{vps.id}",
+        f"owner={owner.id}",
+    )
+
+    return {
+        "message": "VPS created",
+        "vps": {
+            "id": vps.id,
+            "uuid": vps.uuid,
+            "container_id": vps.container_id,
+        },
+    }
+
+
+@app.post("/api/vps/{vps_id}/start")
+def start_vps(
+    vps_id: int,
+    user=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    vps = db.get(VPS, vps_id)
+
+    if not vps:
+        raise HTTPException(
+            status_code=404,
+            detail="VPS not found",
+        )
+
+    if user.role != "admin" and vps.owner_id != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied",
+        )
+
+    if not vps.container_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Container does not exist",
+        )
+
+    try:
+        start(vps.container_id)
+        vps.status = "running"
+        db.commit()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
+    write_audit(
+        db,
+        user.id,
+        "START_VPS",
+        f"vps:{vps.id}",
+    )
+
+    return {"message": "VPS started"}
+
+
+@app.post("/api/vps/{vps_id}/stop")
+def stop_vps(
+    vps_id: int,
+    user=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    vps = db.get(VPS, vps_id)
+
+    if not vps:
+        raise HTTPException(
+            status_code=404,
+            detail="VPS not found",
+        )
+
+    if user.role != "admin" and vps.owner_id != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied",
+        )
+
+    try:
+        stop(vps.container_id)
+        vps.status = "stopped"
+        db.commit()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
+    write_audit(
+        db,
+        user.id,
+        "STOP_VPS",
+        f"vps:{vps.id}",
+    )
+
+    return {"message": "VPS stopped"}
+
+
+@app.post("/api/vps/{vps_id}/restart")
+def restart_vps(
+    vps_id: int,
+    user=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    vps = db.get(VPS, vps_id)
+
+    if not vps:
+        raise HTTPException(
+            status_code=404,
+            detail="VPS not found",
+        )
+
+    if user.role != "admin" and vps.owner_id != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied",
+        )
+
+    try:
+        restart(vps.container_id)
+        vps.status = "running"
+        db.commit()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
+    write_audit(
+        db,
+        user.id,
+        "RESTART_VPS",
+        f"vps:{vps.id}",
+    )
+
+    return {"message": "VPS restarted"}
+
+
+@app.delete("/api/admin/vps/{vps_id}")
+def delete_vps(
+    vps_id: int,
+    admin=Depends(admin_required),
+    db: Session = Depends(get_db),
+):
+    vps = db.get(VPS, vps_id)
+
+    if not vps:
+        raise HTTPException(
+            status_code=404,
+            detail="VPS not found",
+        )
+
+    try:
+        if vps.container_id:
+            remove(vps.container_id)
+    except Exception:
+        pass
+
+    write_audit(
+        db,
+        admin.id,
+        "DELETE_VPS",
+        f"vps:{vps.id}",
+        f"owner={vps.owner_id}",
+    )
+
+    db.delete(vps)
+    db.commit()
+
+    return {
+        "message": "VPS deleted"
+    }
+
+
+@app.get("/api/admin/users")
+def admin_users(
+    admin=Depends(admin_required),
+    db: Session = Depends(get_db),
+):
+    users = db.query(User).all()
+
+    return [
+        {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "role": user.role,
+            "rank": user.rank,
+            "banned": user.banned,
+            "created_at": user.created_at.isoformat(),
         }
-        return $r;
-    },
-    'logger' => function () {
-        $log = new Logger('grimvm');
-        $logPath = ($_ENV['APP_DIR'] ?? '/var/www/grimvm') . '/storage/logs/app.log';
-        $log->pushHandler(new StreamHandler($logPath, Logger::DEBUG));
-        return $log;
-    },
-];
-PHP
+        for user in users
+    ]
 
-# app/Services/DatabaseService.php
-cat > "${APP_DIR}/app/Services/DatabaseService.php" <<'PHP'
-<?php
-declare(strict_types=1);
-namespace GrimVM\Services;
 
-class DatabaseService
-{
-    private \PDO $pdo;
+@app.post("/api/admin/users/{user_id}/ban")
+def ban_user(
+    user_id: int,
+    admin=Depends(admin_required),
+    db: Session = Depends(get_db),
+):
+    user = db.get(User, user_id)
 
-    public function __construct(string $host, string $db, string $user, string $pass)
-    {
-        $dsn = "mysql:host={$host};dbname={$db};charset=utf8mb4;port=3306";
-        $this->pdo = new \PDO($dsn, $user, $pass, [
-            \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
-            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
-            \PDO::ATTR_EMULATE_PREPARES   => false,
-            \PDO::ATTR_TIMEOUT            => 5,
-        ]);
-    }
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found",
+        )
 
-    public function query(string $sql, array $params = []): \PDOStatement
-    {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt;
-    }
+    if user.id == admin.id:
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot ban yourself",
+        )
 
-    public function fetch(string $sql, array $params = []): ?array
-    {
-        $result = $this->query($sql, $params)->fetch();
-        return $result ?: null;
-    }
+    user.banned = True
+    db.commit()
 
-    public function fetchAll(string $sql, array $params = []): array
-    {
-        return $this->query($sql, $params)->fetchAll();
-    }
+    write_audit(
+        db,
+        admin.id,
+        "BAN_USER",
+        f"user:{user.id}",
+    )
 
-    public function insert(string $sql, array $params = []): string
-    {
-        $this->query($sql, $params);
-        return $this->pdo->lastInsertId();
-    }
+    return {"message": "User banned"}
 
-    public function execute(string $sql, array $params = []): int
-    {
-        return $this->query($sql, $params)->rowCount();
-    }
-}
-PHP
 
-# app/Services/DockerService.php
-cat > "${APP_DIR}/app/Services/DockerService.php" <<'PHP'
-<?php
-declare(strict_types=1);
-namespace GrimVM\Services;
+@app.post("/api/admin/users/{user_id}/unban")
+def unban_user(
+    user_id: int,
+    admin=Depends(admin_required),
+    db: Session = Depends(get_db),
+):
+    user = db.get(User, user_id)
 
-class DockerService
-{
-    private string $socket;
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found",
+        )
 
-    public function __construct(string $socket = '/var/run/docker.sock')
-    {
-        $this->socket = $socket;
-    }
+    user.banned = False
+    db.commit()
 
-    private function request(string $method, string $path, array $body = []): array
-    {
-        if (!file_exists($this->socket)) {
-            throw new \RuntimeException('Docker socket not found: ' . $this->socket);
+    write_audit(
+        db,
+        admin.id,
+        "UNBAN_USER",
+        f"user:{user.id}",
+    )
+
+    return {"message": "User unbanned"}
+
+
+@app.get("/api/admin/audit")
+def audit_logs(
+    admin=Depends(admin_required),
+    db: Session = Depends(get_db),
+):
+    logs = db.query(AuditLog).order_by(
+        AuditLog.id.desc()
+    ).limit(200).all()
+
+    return [
+        {
+            "id": item.id,
+            "actor_id": item.actor_id,
+            "action": item.action,
+            "target": item.target,
+            "details": item.details,
+            "created_at": item.created_at.isoformat(),
         }
+        for item in logs
+    ]
+PY
 
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_UNIX_SOCKET_PATH => $this->socket,
-            CURLOPT_URL              => 'http://localhost/v1.43' . $path,
-            CURLOPT_RETURNTRANSFER   => true,
-            CURLOPT_TIMEOUT          => 30,
-            CURLOPT_HTTPHEADER       => ['Content-Type: application/json'],
-        ]);
+# ------------------------------------------------------------
+# Bootstrap admin
+# ------------------------------------------------------------
 
-        if ($method === 'POST') {
-            curl_setopt($ch, CURLOPT_POST, true);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body));
-        } elseif ($method === 'DELETE') {
-            curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'DELETE');
-        }
+cat >"${BACKEND_DIR}/bootstrap_admin.py" <<'PY'
+import os
+import sys
 
-        $response = curl_exec($ch);
-        $code     = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error    = curl_error($ch);
-        curl_close($ch);
+from database import Base, SessionLocal, engine
+from models import User
+from security import hash_password
 
-        if ($response === false) {
-            throw new \RuntimeException('Docker request failed: ' . $error);
-        }
 
-        return ['code' => $code, 'body' => json_decode($response, true) ?? []];
-    }
+Base.metadata.create_all(bind=engine)
 
-    public function createContainer(array $config): string
-    {
-        $result = $this->request('POST',
-            '/containers/create?name=grimvm_' . $config['uuid'],
-            [
-                'Image'    => $config['image'],
-                'Hostname' => 'grimvm-' . substr($config['uuid'], 0, 8),
-                'Env'      => $config['env'] ?? [],
-                'Cmd'      => $config['cmd'] ?? [],
-                'Tty'      => true,
-                'OpenStdin'=> true,
-                'HostConfig' => [
-                    'Memory'        => $config['memory_mb'] * 1024 * 1024,
-                    'NanoCpus'      => $config['cpu_cores'] * 1_000_000_000,
-                    'RestartPolicy' => ['Name' => 'unless-stopped'],
-                    'Binds'         => $config['mounts'] ?? [],
-                ],
-                'Labels' => [
-                    'grimvm.managed' => 'true',
-                    'grimvm.uuid'    => $config['uuid'],
-                    'grimvm.owner'   => (string)$config['owner_id'],
-                ],
-            ]
-        );
+db = SessionLocal()
 
-        if ($result['code'] !== 201) {
-            throw new \RuntimeException('Container create failed: ' . json_encode($result['body']));
-        }
+username = os.getenv("ADMIN_USERNAME", "admin")
+password = os.getenv("ADMIN_PASSWORD", "")
+email = os.getenv(
+    "ADMIN_EMAIL",
+    "admin@example.com",
+)
 
-        return $result['body']['Id'];
-    }
+existing = db.query(User).filter(
+    User.username == username
+).first()
 
-    public function startContainer(string $id): bool
-    {
-        $r = $this->request('POST', "/containers/{$id}/start");
-        return in_array($r['code'], [204, 304]);
-    }
+if existing:
+    existing.role = "admin"
+    existing.rank = "ultimate"
 
-    public function stopContainer(string $id): bool
-    {
-        $r = $this->request('POST', "/containers/{$id}/stop");
-        return in_array($r['code'], [204, 304]);
-    }
+    if password:
+        existing.password_hash = hash_password(password)
 
-    public function deleteContainer(string $id): bool
-    {
-        $r = $this->request('DELETE', "/containers/{$id}?force=true");
-        return $r['code'] === 204;
-    }
+    existing.email = email
 
-    public function listContainers(): array
-    {
-        $filter = urlencode(json_encode(['label' => ['grimvm.managed=true']]));
-        $r = $this->request('GET', "/containers/json?all=true&filters={$filter}");
-        return $r['body'] ?? [];
-    }
-}
-PHP
+    db.commit()
 
-# app/Services/TmateService.php
-cat > "${APP_DIR}/app/Services/TmateService.php" <<'PHP'
-<?php
-declare(strict_types=1);
-namespace GrimVM\Services;
+    print(
+        f"GrimVM admin updated: {username}"
+    )
 
-class TmateService
-{
-    public function __construct(private string $server = 'ssh.tmate.io') {}
+else:
+    user = User(
+        username=username,
+        email=email,
+        password_hash=hash_password(password),
+        role="admin",
+        rank="ultimate",
+    )
 
-    public function createSession(string $containerId, string $uuid): array
-    {
-        $name   = 'gvm-' . substr($uuid, 0, 8);
-        $script = "apt-get update -qq && apt-get install -y -qq tmate && "
-                . "tmate -S /tmp/{$name}.sock new-session -d -s {$name} && "
-                . "tmate -S /tmp/{$name}.sock wait tmate-ready && "
-                . "tmate -S /tmp/{$name}.sock display -p '#{tmate_ssh}' > /tmp/{$name}_ssh.txt && "
-                . "tmate -S /tmp/{$name}.sock display -p '#{tmate_web}' > /tmp/{$name}_web.txt";
+    db.add(user)
+    db.commit()
 
-        shell_exec("docker exec {$containerId} bash -c " . escapeshellarg($script) . " 2>/dev/null");
+    print(
+        f"GrimVM admin created: {username}"
+    )
 
-        $ssh = trim(shell_exec("docker exec {$containerId} cat /tmp/{$name}_ssh.txt 2>/dev/null") ?? '');
-        $web = trim(shell_exec("docker exec {$containerId} cat /tmp/{$name}_web.txt 2>/dev/null") ?? '');
+db.close()
+PY
 
-        return ['ssh' => $ssh, 'web' => $web, 'name' => $name];
-    }
+# ------------------------------------------------------------
+# Frontend - index
+# ------------------------------------------------------------
 
-    public function killSession(string $containerId, string $uuid): void
-    {
-        $name = 'gvm-' . substr($uuid, 0, 8);
-        shell_exec("docker exec {$containerId} tmate -S /tmp/{$name}.sock kill-session 2>/dev/null");
-    }
-}
-PHP
-
-# app/Services/RankService.php
-cat > "${APP_DIR}/app/Services/RankService.php" <<'PHP'
-<?php
-declare(strict_types=1);
-namespace GrimVM\Services;
-
-class RankService
-{
-    private const THRESHOLDS = ['Newbie' => 0, 'Pro' => 2, 'Ultimate' => 4];
-
-    public function __construct(private DatabaseService $db) {}
-
-    public function recalculate(int $userId): string
-    {
-        $user = $this->db->fetch('SELECT vps_count FROM users WHERE id = ?', [$userId]);
-        if (!$user) return 'Newbie';
-
-        $rank = 'Newbie';
-        foreach (self::THRESHOLDS as $r => $min) {
-            if ((int)$user['vps_count'] >= $min) $rank = $r;
-        }
-
-        $this->db->execute('UPDATE users SET rank = ? WHERE id = ?', [$rank, $userId]);
-        return $rank;
-    }
-
-    public function claimReward(int $userId, string $code): array
-    {
-        $user   = $this->db->fetch('SELECT rank FROM users WHERE id = ?', [$userId]);
-        $reward = $this->db->fetch(
-            'SELECT * FROM rewards WHERE code = ? AND claimed_by IS NULL', [$code]
-        );
-
-        if (!$reward) return ['success' => false, 'message' => 'Invalid or already claimed.'];
-        if (!in_array($user['rank'], ['Pro', 'Ultimate'])) {
-            return ['success' => false, 'message' => "Requires {$reward['rank_req']} rank."];
-        }
-
-        $this->db->execute(
-            'UPDATE rewards SET claimed_by = ?, claimed_at = NOW() WHERE id = ?',
-            [$userId, $reward['id']]
-        );
-        return ['success' => true, 'reward' => $reward];
-    }
-}
-PHP
-
-# app/Services/AuditService.php
-cat > "${APP_DIR}/app/Services/AuditService.php" <<'PHP'
-<?php
-declare(strict_types=1);
-namespace GrimVM\Services;
-
-class AuditService
-{
-    private const LIMIT = 20;
-
-    public function __construct(private DatabaseService $db) {}
-
-    public function log(int $userId, string $action, string $target = '', string $ip = ''): void
-    {
-        $this->db->execute(
-            'INSERT INTO audit_log (user_id, action, target, ip) VALUES (?,?,?,?)',
-            [$userId, $action, $target, $ip]
-        );
-    }
-
-    public function checkDeleteLimit(int $adminId): array
-    {
-        $count = (int)($this->db->fetch(
-            'SELECT COUNT(*) as c FROM delete_log WHERE admin_id = ? AND DATE(deleted_at) = CURDATE()',
-            [$adminId]
-        )['c'] ?? 0);
-
-        if ($count >= self::LIMIT) {
-            $this->db->execute(
-                'UPDATE users SET banned = 1, ban_reason = ? WHERE id = ?',
-                ['Auto-ban: exceeded daily delete limit (' . self::LIMIT . ')', $adminId]
-            );
-            return ['allowed' => false, 'reason' => 'Daily delete limit exceeded. Account suspended.'];
-        }
-
-        return ['allowed' => true, 'count' => $count, 'limit' => self::LIMIT];
-    }
-
-    public function logDelete(int $adminId, string $uuid): void
-    {
-        $this->db->execute(
-            'INSERT INTO delete_log (admin_id, vps_uuid) VALUES (?,?)',
-            [$adminId, $uuid]
-        );
-    }
-
-    public function getLog(int $limit = 200): array
-    {
-        return $this->db->fetchAll(
-            'SELECT a.*, u.username FROM audit_log a
-             LEFT JOIN users u ON u.id = a.user_id
-             ORDER BY a.created_at DESC LIMIT ?',
-            [$limit]
-        );
-    }
-}
-PHP
-
-# app/Models/User.php
-cat > "${APP_DIR}/app/Models/User.php" <<'PHP'
-<?php
-declare(strict_types=1);
-namespace GrimVM\Models;
-
-use GrimVM\Services\DatabaseService;
-
-class User
-{
-    public function __construct(private DatabaseService $db) {}
-
-    public function find(int $id): ?array
-    {
-        return $this->db->fetch('SELECT * FROM users WHERE id = ?', [$id]);
-    }
-
-    public function findByEmail(string $email): ?array
-    {
-        return $this->db->fetch('SELECT * FROM users WHERE email = ?', [$email]);
-    }
-
-    public function findByToken(string $token): ?array
-    {
-        return $this->db->fetch('SELECT * FROM users WHERE api_token = ?', [$token]);
-    }
-
-    public function create(array $data): int
-    {
-        return (int)$this->db->insert(
-            'INSERT INTO users (username, email, password, role) VALUES (?,?,?,?)',
-            [
-                $data['username'],
-                $data['email'],
-                password_hash($data['password'], PASSWORD_BCRYPT, ['cost' => 12]),
-                $data['role'] ?? 'member',
-            ]
-        );
-    }
-
-    public function all(): array
-    {
-        return $this->db->fetchAll(
-            'SELECT id,username,email,role,rank,vps_count,banned,created_at FROM users ORDER BY created_at DESC'
-        );
-    }
-
-    public function ban(int $id, string $reason, string $ip = ''): void
-    {
-        $this->db->execute(
-            'UPDATE users SET banned=1, ban_reason=?, ban_ip=? WHERE id=?',
-            [$reason, $ip, $id]
-        );
-    }
-
-    public function unban(int $id): void
-    {
-        $this->db->execute(
-            'UPDATE users SET banned=0, ban_reason=NULL, ban_ip=NULL WHERE id=?', [$id]
-        );
-    }
-
-    public function mute(int $id, int $minutes): void
-    {
-        $until = date('Y-m-d H:i:s', strtotime("+{$minutes} minutes"));
-        $this->db->execute('UPDATE users SET muted_until=? WHERE id=?', [$until, $id]);
-    }
-}
-PHP
-
-# app/Models/VPS.php
-cat > "${APP_DIR}/app/Models/VPS.php" <<'PHP'
-<?php
-declare(strict_types=1);
-namespace GrimVM\Models;
-
-use GrimVM\Services\DatabaseService;
-
-class VPS
-{
-    public function __construct(private DatabaseService $db) {}
-
-    public function find(string $uuid): ?array
-    {
-        return $this->db->fetch('SELECT * FROM vps WHERE uuid=?', [$uuid]);
-    }
-
-    public function forUser(int $uid): array
-    {
-        return $this->db->fetchAll(
-            'SELECT v.*, n.name as node_name, n.location
-             FROM vps v JOIN nodes n ON n.id=v.node_id
-             WHERE v.owner_id=? AND v.status!="deleted"
-             ORDER BY v.created_at DESC',
-            [$uid]
-        );
-    }
-
-    public function all(): array
-    {
-        return $this->db->fetchAll(
-            'SELECT v.*, u.username, n.name as node_name
-             FROM vps v
-             JOIN users u ON u.id=v.owner_id
-             JOIN nodes n ON n.id=v.node_id
-             WHERE v.status!="deleted"
-             ORDER BY v.created_at DESC'
-        );
-    }
-
-    public function create(array $d): string
-    {
-        $uuid = sprintf('%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
-            mt_rand(0,0xffff), mt_rand(0,0xffff), mt_rand(0,0xffff),
-            mt_rand(0,0x0fff)|0x4000, mt_rand(0,0x3fff)|0x8000,
-            mt_rand(0,0xffff), mt_rand(0,0xffff), mt_rand(0,0xffff)
-        );
-        $this->db->insert(
-            'INSERT INTO vps (uuid,name,owner_id,node_id,image,memory_mb,disk_gb,cpu_cores)
-             VALUES (?,?,?,?,?,?,?,?)',
-            [$uuid,$d['name'],$d['owner_id'],$d['node_id'],
-             $d['image'],$d['memory_mb'],$d['disk_gb'],$d['cpu_cores']]
-        );
-        return $uuid;
-    }
-
-    public function updateStatus(string $uuid, string $status): void
-    {
-        $this->db->execute('UPDATE vps SET status=? WHERE uuid=?', [$status, $uuid]);
-    }
-
-    public function updateContainer(string $uuid, string $cid, ?string $tmate = null): void
-    {
-        $this->db->execute(
-            'UPDATE vps SET container_id=?, tmate_session=? WHERE uuid=?',
-            [$cid, $tmate, $uuid]
-        );
-    }
-}
-PHP
-
-# app/Middleware/AuthMiddleware.php
-cat > "${APP_DIR}/app/Middleware/AuthMiddleware.php" <<'PHP'
-<?php
-declare(strict_types=1);
-namespace GrimVM\Middleware;
-
-use Firebase\JWT\JWT;
-use Firebase\JWT\Key;
-use Psr\Http\Message\ResponseInterface;
-use Psr\Http\Message\ServerRequestInterface;
-use Psr\Http\Server\MiddlewareInterface;
-use Psr\Http\Server\RequestHandlerInterface;
-use Slim\Psr7\Response;
-
-class AuthMiddleware implements MiddlewareInterface
-{
-    private const HIERARCHY = ['member' => 0, 'admin' => 1, 'owner' => 2];
-
-    public function __construct(private string $required = 'member') {}
-
-    public function process(ServerRequestInterface $req, RequestHandlerInterface $handler): ResponseInterface
-    {
-        $header = $req->getHeaderLine('Authorization');
-        if (!str_starts_with($header, 'Bearer ')) {
-            return $this->fail(401, 'Missing token');
-        }
-
-        try {
-            $payload = JWT::decode(
-                substr($header, 7),
-                new Key($_ENV['APP_SECRET'] ?? 'fallback-secret', 'HS256')
-            );
-        } catch (\Throwable $e) {
-            return $this->fail(401, 'Invalid or expired token');
-        }
-
-        $userLevel = self::HIERARCHY[$payload->role] ?? 0;
-        $reqLevel  = self::HIERARCHY[$this->required] ?? 0;
-
-        if ($userLevel < $reqLevel) {
-            return $this->fail(403, 'Insufficient permissions');
-        }
-
-        return $handler->handle($req->withAttribute('auth_user', [
-            'id'   => $payload->sub,
-            'role' => $payload->role,
-            'rank' => $payload->rank,
-        ]));
-    }
-
-    private function fail(int $code, string $msg): ResponseInterface
-    {
-        $res = new Response($code);
-        $res->getBody()->write(json_encode(['error' => $msg]));
-        return $res->withHeader('Content-Type', 'application/json');
-    }
-}
-PHP
-
-# app/Middleware/SessionMiddleware.php
-cat > "${APP_DIR}/app/Middleware/SessionMiddleware.php" <<'PHP'
-<?php
-declare(strict_types=1);
-namespace GrimVM\Middleware;
-
-use Psr\Http\Message\ResponseInterface;
-use Psr\Http\Message\ServerRequestInterface;
-use Psr\Http\Server\MiddlewareInterface;
-use Psr\Http\Server\RequestHandlerInterface;
-
-class SessionMiddleware implements MiddlewareInterface
-{
-    public function process(ServerRequestInterface $req, RequestHandlerInterface $handler): ResponseInterface
-    {
-        if (session_status() === PHP_SESSION_NONE) {
-            session_set_cookie_params([
-                'lifetime' => 86400 * 7,
-                'secure'   => true,
-                'httponly' => true,
-                'samesite' => 'Lax',
-            ]);
-            session_start();
-        }
-        return $handler->handle($req);
-    }
-}
-PHP
-
-# app/Middleware/RateLimitMiddleware.php
-cat > "${APP_DIR}/app/Middleware/RateLimitMiddleware.php" <<'PHP'
-<?php
-declare(strict_types=1);
-namespace GrimVM\Middleware;
-
-use Psr\Http\Message\ResponseInterface;
-use Psr\Http\Message\ServerRequestInterface;
-use Psr\Http\Server\MiddlewareInterface;
-use Psr\Http\Server\RequestHandlerInterface;
-use Slim\Psr7\Response;
-
-class RateLimitMiddleware implements MiddlewareInterface
-{
-    private const WINDOW = 60;
-    private const LIMIT  = 120;
-
-    public function __construct(private \Redis $redis) {}
-
-    public function process(ServerRequestInterface $req, RequestHandlerInterface $handler): ResponseInterface
-    {
-        $ip  = $req->getServerParams()['HTTP_CF_CONNECTING_IP']
-            ?? $req->getServerParams()['REMOTE_ADDR']
-            ?? 'unknown';
-        $key = "rl:{$ip}";
-
-        try {
-            $hits = $this->redis->incr($key);
-            if ($hits === 1) $this->redis->expire($key, self::WINDOW);
-            if ($hits > self::LIMIT) {
-                $res = new Response(429);
-                $res->getBody()->write(json_encode(['error' => 'Rate limit exceeded']));
-                return $res->withHeader('Content-Type','application/json')
-                           ->withHeader('Retry-After', (string)self::WINDOW);
-            }
-        } catch (\Throwable) {
-            // Redis down — skip rate limiting
-        }
-
-        return $handler->handle($req);
-    }
-}
-PHP
-
-# app/Controllers/AuthController.php
-cat > "${APP_DIR}/app/Controllers/AuthController.php" <<'PHP'
-<?php
-declare(strict_types=1);
-namespace GrimVM\Controllers;
-
-use GrimVM\Models\User;
-use GrimVM\Services\AuditService;
-use Firebase\JWT\JWT;
-use Psr\Http\Message\ResponseInterface as Res;
-use Psr\Http\Message\ServerRequestInterface as Req;
-
-class AuthController
-{
-    public function __construct(
-        private User $user,
-        private AuditService $audit
-    ) {}
-
-    public function login(Req $req, Res $res): Res
-    {
-        $b     = (array)$req->getParsedBody();
-        $email = trim($b['email'] ?? '');
-        $pass  = $b['password'] ?? '';
-
-        $user = $this->user->findByEmail($email);
-
-        if (!$user || !password_verify($pass, $user['password'])) {
-            return $this->json($res, ['error' => 'Invalid credentials'], 401);
-        }
-
-        if ($user['banned']) {
-            return $this->json($res, ['error' => 'Account banned: ' . $user['ban_reason']], 403);
-        }
-
-        $token = JWT::encode([
-            'sub'  => $user['id'],
-            'role' => $user['role'],
-            'rank' => $user['rank'],
-            'iat'  => time(),
-            'exp'  => time() + 86400 * 7,
-        ], $_ENV['APP_SECRET'] ?? 'fallback', 'HS256');
-
-        $ip = $req->getServerParams()['HTTP_CF_CONNECTING_IP']
-           ?? $req->getServerParams()['REMOTE_ADDR'] ?? '';
-        $this->audit->log($user['id'], 'login', '', $ip);
-
-        return $this->json($res, [
-            'token' => $token,
-            'user'  => [
-                'id'       => $user['id'],
-                'username' => $user['username'],
-                'email'    => $user['email'],
-                'role'     => $user['role'],
-                'rank'     => $user['rank'],
-            ],
-        ]);
-    }
-
-    public function register(Req $req, Res $res): Res
-    {
-        $b    = (array)$req->getParsedBody();
-        $user = trim($b['username'] ?? '');
-        $mail = trim($b['email'] ?? '');
-        $pass = $b['password'] ?? '';
-
-        if (!$user || !$mail || !$pass) {
-            return $this->json($res, ['error' => 'All fields required'], 400);
-        }
-        if (!filter_var($mail, FILTER_VALIDATE_EMAIL)) {
-            return $this->json($res, ['error' => 'Invalid email'], 400);
-        }
-        if (strlen($pass) < 6) {
-            return $this->json($res, ['error' => 'Password min 6 chars'], 400);
-        }
-
-        try {
-            $id = $this->user->create(['username'=>$user,'email'=>$mail,'password'=>$pass]);
-            return $this->json($res, ['message' => 'Account created', 'id' => $id], 201);
-        } catch (\PDOException) {
-            return $this->json($res, ['error' => 'Username or email already exists'], 409);
-        }
-    }
-
-    private function json(Res $res, array $data, int $code = 200): Res
-    {
-        $res->getBody()->write(json_encode($data));
-        return $res->withHeader('Content-Type','application/json')->withStatus($code);
-    }
-}
-PHP
-
-# app/Controllers/VPSController.php
-cat > "${APP_DIR}/app/Controllers/VPSController.php" <<'PHP'
-<?php
-declare(strict_types=1);
-namespace GrimVM\Controllers;
-
-use GrimVM\Models\{VPS, User};
-use GrimVM\Services\{DockerService, TmateService, RankService, AuditService, DatabaseService};
-use Psr\Http\Message\ResponseInterface as Res;
-use Psr\Http\Message\ServerRequestInterface as Req;
-
-class VPSController
-{
-    public function __construct(
-        private VPS $vps,
-        private User $user,
-        private DockerService $docker,
-        private TmateService $tmate,
-        private RankService $rank,
-        private AuditService $audit,
-        private DatabaseService $db
-    ) {}
-
-    public function create(Req $req, Res $res): Res
-    {
-        $admin = $req->getAttribute('auth_user');
-        $b     = (array)$req->getParsedBody();
-
-        foreach (['name','owner_id','node_id','image','memory_mb','disk_gb','cpu_cores'] as $f) {
-            if (empty($b[$f])) return $this->json($res, ['error' => "Missing: {$f}"], 400);
-        }
-
-        $uuid = $this->vps->create([
-            'name'      => $b['name'],
-            'owner_id'  => (int)$b['owner_id'],
-            'node_id'   => (int)$b['node_id'],
-            'image'     => $b['image'],
-            'memory_mb' => (int)$b['memory_mb'],
-            'disk_gb'   => (int)$b['disk_gb'],
-            'cpu_cores' => (int)$b['cpu_cores'],
-        ]);
-
-        try {
-            $cid = $this->docker->createContainer([
-                'uuid'      => $uuid,
-                'image'     => $b['image'],
-                'memory_mb' => (int)$b['memory_mb'],
-                'disk_gb'   => (int)$b['disk_gb'],
-                'cpu_cores' => (int)$b['cpu_cores'],
-                'owner_id'  => (int)$b['owner_id'],
-            ]);
-            $this->docker->startContainer($cid);
-            $tmate = $this->tmate->createSession($cid, $uuid);
-            $this->vps->updateContainer($uuid, $cid, $tmate['ssh']);
-            $this->vps->updateStatus($uuid, 'running');
-        } catch (\Throwable $e) {
-            $this->vps->updateStatus($uuid, 'stopped');
-            $cid   = '';
-            $tmate = ['ssh' => '', 'web' => ''];
-        }
-
-        $this->db->execute(
-            'UPDATE users SET vps_count = vps_count + 1 WHERE id = ?',
-            [(int)$b['owner_id']]
-        );
-        $newRank = $this->rank->recalculate((int)$b['owner_id']);
-        $this->audit->log($admin['id'], 'vps_create', $uuid);
-
-        return $this->json($res, [
-            'uuid'       => $uuid,
-            'tmate_ssh'  => $tmate['ssh'] ?? '',
-            'tmate_web'  => $tmate['web'] ?? '',
-            'owner_rank' => $newRank,
-        ], 201);
-    }
-
-    public function delete(Req $req, Res $res, array $args): Res
-    {
-        $admin = $req->getAttribute('auth_user');
-        $limit = $this->audit->checkDeleteLimit($admin['id']);
-        if (!$limit['allowed']) {
-            return $this->json($res, ['error' => $limit['reason']], 429);
-        }
-
-        $vps = $this->vps->find($args['uuid']);
-        if (!$vps) return $this->json($res, ['error' => 'Not found'], 404);
-
-        if ($vps['container_id']) {
-            try {
-                $this->tmate->killSession($vps['container_id'], $vps['uuid']);
-                $this->docker->stopContainer($vps['container_id']);
-                $this->docker->deleteContainer($vps['container_id']);
-            } catch (\Throwable) {}
-        }
-
-        $this->vps->updateStatus($vps['uuid'], 'deleted');
-        $this->db->execute(
-            'UPDATE users SET vps_count = GREATEST(vps_count-1,0) WHERE id=?',
-            [$vps['owner_id']]
-        );
-        $this->rank->recalculate((int)$vps['owner_id']);
-        $this->audit->logDelete($admin['id'], $vps['uuid']);
-
-        return $this->json($res, ['message' => 'Deleted', 'uuid' => $vps['uuid']]);
-    }
-
-    public function power(Req $req, Res $res, array $args): Res
-    {
-        $user   = $req->getAttribute('auth_user');
-        $vps    = $this->vps->find($args['uuid']);
-        $action = $args['action'];
-
-        if (!$vps) return $this->json($res, ['error' => 'Not found'], 404);
-
-        if ($vps['owner_id'] !== $user['id'] && !in_array($user['role'], ['admin','owner'])) {
-            return $this->json($res, ['error' => 'Forbidden'], 403);
-        }
-
-        try {
-            match ($action) {
-                'start'   => $this->docker->startContainer($vps['container_id']),
-                'stop'    => $this->docker->stopContainer($vps['container_id']),
-                'restart' => (function() use ($vps) {
-                    $this->docker->stopContainer($vps['container_id']);
-                    $this->docker->startContainer($vps['container_id']);
-                })(),
-                default => throw new \InvalidArgumentException('Invalid action')
-            };
-            $status = $action === 'stop' ? 'stopped' : 'running';
-            $this->vps->updateStatus($vps['uuid'], $status);
-        } catch (\Throwable $e) {
-            return $this->json($res, ['error' => $e->getMessage()], 500);
-        }
-
-        return $this->json($res, ['message' => "VPS {$action} OK"]);
-    }
-
-    public function list(Req $req, Res $res): Res
-    {
-        $user = $req->getAttribute('auth_user');
-        return $this->json($res, ['vps' => $this->vps->forUser($user['id'])]);
-    }
-
-    public function adminList(Req $req, Res $res): Res
-    {
-        return $this->json($res, ['vps' => $this->vps->all()]);
-    }
-
-    private function json(Res $res, array $data, int $code = 200): Res
-    {
-        $res->getBody()->write(json_encode($data));
-        return $res->withHeader('Content-Type','application/json')->withStatus($code);
-    }
-}
-PHP
-
-# app/Controllers/AdminController.php
-cat > "${APP_DIR}/app/Controllers/AdminController.php" <<'PHP'
-<?php
-declare(strict_types=1);
-namespace GrimVM\Controllers;
-
-use GrimVM\Models\User;
-use GrimVM\Services\{AuditService, DatabaseService};
-use Psr\Http\Message\ResponseInterface as Res;
-use Psr\Http\Message\ServerRequestInterface as Req;
-
-class AdminController
-{
-    public function __construct(
-        private User $user,
-        private AuditService $audit,
-        private DatabaseService $db
-    ) {}
-
-    public function listUsers(Req $req, Res $res): Res
-    {
-        return $this->json($res, ['users' => $this->user->all()]);
-    }
-
-    public function banUser(Req $req, Res $res, array $args): Res
-    {
-        $admin  = $req->getAttribute('auth_user');
-        $b      = (array)$req->getParsedBody();
-        $this->user->ban((int)$args['id'], $b['reason'] ?? 'No reason', $b['ip'] ?? '');
-        $this->audit->log($admin['id'], 'ban', $args['id']);
-        return $this->json($res, ['message' => 'Banned']);
-    }
-
-    public function unbanUser(Req $req, Res $res, array $args): Res
-    {
-        $admin = $req->getAttribute('auth_user');
-        $this->user->unban((int)$args['id']);
-        $this->audit->log($admin['id'], 'unban', $args['id']);
-        return $this->json($res, ['message' => 'Unbanned']);
-    }
-
-    public function muteUser(Req $req, Res $res, array $args): Res
-    {
-        $admin = $req->getAttribute('auth_user');
-        $b     = (array)$req->getParsedBody();
-        $min   = (int)($b['minutes'] ?? 60);
-        $this->user->mute((int)$args['id'], $min);
-        $this->audit->log($admin['id'], 'mute', $args['id']);
-        return $this->json($res, ['message' => "Muted {$min} min"]);
-    }
-
-    public function createNode(Req $req, Res $res): Res
-    {
-        $admin = $req->getAttribute('auth_user');
-        $b     = (array)$req->getParsedBody();
-        $id    = $this->db->insert(
-            'INSERT INTO nodes (name,location,ip,port,memory_mb,disk_gb,cpu_cores)
-             VALUES (?,?,?,?,?,?,?)',
-            [$b['name'],$b['location'],$b['ip'],
-             (int)($b['port']??2222),(int)$b['memory_mb'],
-             (int)$b['disk_gb'],(int)$b['cpu_cores']]
-        );
-        $this->audit->log($admin['id'], 'node_create', (string)$id);
-        return $this->json($res, ['message' => 'Node created', 'id' => $id], 201);
-    }
-
-    public function listNodes(Req $req, Res $res): Res
-    {
-        return $this->json($res, ['nodes' => $this->db->fetchAll('SELECT * FROM nodes ORDER BY id')]);
-    }
-
-    public function getSettings(Req $req, Res $res): Res
-    {
-        $rows = $this->db->fetchAll('SELECT * FROM settings');
-        return $this->json($res, ['settings' => array_column($rows, 'value', 'key')]);
-    }
-
-    public function updateSetting(Req $req, Res $res, array $args): Res
-    {
-        $b = (array)$req->getParsedBody();
-        $this->db->execute(
-            'INSERT INTO settings (`key`,`value`) VALUES (?,?) ON DUPLICATE KEY UPDATE `value`=?',
-            [$args['key'], $b['value']??'', $b['value']??'']
-        );
-        return $this->json($res, ['message' => 'Updated']);
-    }
-
-    public function getAuditLog(Req $req, Res $res): Res
-    {
-        return $this->json($res, ['log' => $this->audit->getLog()]);
-    }
-
-    private function json(Res $res, array $data, int $code = 200): Res
-    {
-        $res->getBody()->write(json_encode($data));
-        return $res->withHeader('Content-Type','application/json')->withStatus($code);
-    }
-}
-PHP
-
-# routes/web.php
-cat > "${APP_DIR}/routes/web.php" <<'PHP'
-<?php
-$app->get('/', function($req, $res) {
-    return $res->withHeader('Location', '/dashboard')->withStatus(302);
-});
-
-$app->get('/dashboard[/{path:.*}]', function($req, $res) {
-    $f = GRIMVM_ROOT . '/public/index.html';
-    $res->getBody()->write(file_exists($f) ? file_get_contents($f) : '<h1>GrimVM</h1>');
-    return $res->withHeader('Content-Type','text/html');
-});
-
-$app->get('/admin[/{path:.*}]', function($req, $res) {
-    $f = GRIMVM_ROOT . '/public/index.html';
-    $res->getBody()->write(file_exists($f) ? file_get_contents($f) : '<h1>GrimVM Admin</h1>');
-    return $res->withHeader('Content-Type','text/html');
-});
-PHP
-
-# routes/api.php
-cat > "${APP_DIR}/routes/api.php" <<'PHP'
-<?php
-use GrimVM\Controllers\{AuthController, VPSController};
-use GrimVM\Middleware\AuthMiddleware;
-
-$app->group('/api/auth', function($g) {
-    $g->post('/login',    [AuthController::class, 'login']);
-    $g->post('/register', [AuthController::class, 'register']);
-});
-
-$app->group('/api/vps', function($g) {
-    $g->get('',                              [VPSController::class, 'list']);
-    $g->post('/{uuid}/power/{action}',       [VPSController::class, 'power']);
-})->add(new AuthMiddleware('member'));
-
-$app->group('/api/admin/vps', function($g) {
-    $g->post('',          [VPSController::class, 'create']);
-    $g->get('',           [VPSController::class, 'adminList']);
-    $g->delete('/{uuid}', [VPSController::class, 'delete']);
-})->add(new AuthMiddleware('admin'));
-PHP
-
-# routes/admin.php
-cat > "${APP_DIR}/routes/admin.php" <<'PHP'
-<?php
-use GrimVM\Controllers\AdminController;
-use GrimVM\Middleware\AuthMiddleware;
-
-$app->group('/api/admin', function($g) {
-    $g->get('/users',              [AdminController::class, 'listUsers']);
-    $g->post('/users/{id}/ban',    [AdminController::class, 'banUser']);
-    $g->post('/users/{id}/unban',  [AdminController::class, 'unbanUser']);
-    $g->post('/users/{id}/mute',   [AdminController::class, 'muteUser']);
-    $g->post('/nodes',             [AdminController::class, 'createNode']);
-    $g->get('/nodes',              [AdminController::class, 'listNodes']);
-    $g->get('/settings',           [AdminController::class, 'getSettings']);
-    $g->put('/settings/{key}',     [AdminController::class, 'updateSetting']);
-    $g->get('/audit',              [AdminController::class, 'getAuditLog']);
-})->add(new AuthMiddleware('admin'));
-PHP
-
-# ── Frontend HTML ─────────────────────────────────────────────
-log "Writing frontend..."
-cat > "${APP_DIR}/public/index.html" <<'HTML'
+cat >"${FRONTEND_DIR}/index.html" <<'HTML'
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GrimVM</title>
-<style>
-:root{--bg:#0a0c10;--bg2:#111420;--bg3:#191c2a;--border:#1e2235;--accent:#6c47ff;--green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--text:#e2e8f0;--muted:#64748b;--mono:'JetBrains Mono',monospace}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font-family:Inter,sans-serif;min-height:100vh}
-#login{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:var(--bg);z-index:99}
-.card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:36px;width:360px}
-.logo{font-family:var(--mono);font-size:24px;font-weight:700;color:var(--accent);margin-bottom:4px}
-.sub{color:var(--muted);font-size:12px;margin-bottom:24px}
-.fg{margin-bottom:14px}
-.fg label{display:block;font-size:11px;color:var(--muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em}
-.fg input{width:100%;padding:9px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:13px;outline:none}
-.fg input:focus{border-color:var(--accent)}
-.btn{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:7px;font-size:14px;font-weight:600;cursor:pointer}
-.btn:hover{opacity:.9}
-.err{color:var(--red);font-size:12px;margin-bottom:10px;display:none}
-#app{display:none}
-.sidebar{position:fixed;left:0;top:0;bottom:0;width:210px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column}
-.slogo{padding:20px;font-family:var(--mono);font-size:17px;font-weight:700;color:var(--accent);border-bottom:1px solid var(--border)}
-.slogo small{color:var(--muted);font-size:10px;display:block;font-weight:400}
-nav{flex:1;padding:12px 0}
-.ni{padding:9px 18px;cursor:pointer;color:var(--muted);font-size:13px;display:flex;align-items:center;gap:8px;transition:.15s}
-.ni:hover,.ni.a{color:var(--text);background:var(--bg3)}
-.ni.a{border-left:2px solid var(--accent)}
-.suser{padding:14px 18px;border-top:1px solid var(--border);font-size:12px;color:var(--muted)}
-.badge{display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;background:var(--accent);color:#fff;margin-top:3px}
-.badge.Pro{background:#0ea5e9}.badge.Ultimate{background:linear-gradient(90deg,#6c47ff,#ec4899)}
-.main{margin-left:210px;padding:28px;min-height:100vh}
-.pg{display:none}.pg.a{display:block}
-.ptitle{font-size:20px;font-weight:700;margin-bottom:20px}
-.srow{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:24px}
-.sc{background:var(--bg2);border:1px solid var(--border);border-radius:9px;padding:18px}
-.sl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px}
-.sv{font-size:26px;font-weight:700;font-family:var(--mono)}
-.sv.g{color:var(--green)}.sv.ac{color:var(--accent)}
-.tc{background:var(--bg2);border:1px solid var(--border);border-radius:9px;overflow:hidden}
-.th{padding:14px 18px;border-bottom:1px solid var(--border);font-size:13px;font-weight:600;display:flex;justify-content:space-between;align-items:center}
-table{width:100%;border-collapse:collapse}
-th{padding:10px 18px;text-align:left;font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;border-bottom:1px solid var(--border)}
-td{padding:12px 18px;font-size:13px;border-bottom:1px solid var(--border)}
-tr:last-child td{border:none}
-tr:hover td{background:var(--bg3)}
-.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}
-.dot.running{background:var(--green);box-shadow:0 0 5px var(--green)}
-.dot.stopped{background:var(--muted)}
-.ab{padding:3px 9px;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer;border:none;margin-right:3px}
-.ab.s{background:rgba(34,197,94,.15);color:var(--green)}
-.ab.d{background:rgba(239,68,68,.15);color:var(--red)}
-.ab.c{background:rgba(108,71,255,.15);color:var(--accent)}
-.con{background:#000;border:1px solid var(--border);border-radius:8px;padding:14px;font-family:var(--mono);font-size:12px;color:#00ff88;min-height:260px;white-space:pre-wrap;overflow-y:auto}
-.tmi{background:var(--bg3);border:1px solid var(--border);border-radius:7px;padding:12px 16px;margin-top:14px;font-size:12px;font-family:var(--mono)}
-select{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:7px 11px;color:var(--text);font-size:13px;margin-bottom:14px;width:100%}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-#toast{position:fixed;bottom:20px;right:20px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:11px 16px;font-size:13px;transform:translateY(60px);transition:.2s;z-index:999}
-#toast.show{transform:translateY(0)}
-#toast.ok{border-color:var(--green);color:var(--green)}
-#toast.err{border-color:var(--red);color:var(--red)}
-</style>
+    <meta charset="UTF-8">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1"
+    >
+
+    <title>GrimVM</title>
+
+    <link
+        rel="stylesheet"
+        href="/css/grim.css"
+    >
 </head>
+
 <body>
-<div id="login">
-  <div class="card">
-    <div class="logo">Grim<span style="color:#fff">VM</span></div>
-    <div class="sub">ArizNodes Team · Project #5</div>
-    <div class="err" id="lerr"></div>
-    <div class="fg"><label>Email</label><input id="lemail" type="email" placeholder="admin@gmail.com"></div>
-    <div class="fg"><label>Password</label><input id="lpass" type="password" placeholder="••••••••"></div>
-    <button class="btn" onclick="login()">Sign In</button>
-    <div style="text-align:center;margin-top:12px;font-size:12px;color:var(--muted)">
-      <a href="#" onclick="showReg()" style="color:var(--accent)">Create account</a>
-    </div>
-  </div>
-</div>
 
-<div id="app">
-  <div class="sidebar">
-    <div class="slogo">GrimVM<small>Hypervisor Panel #5</small></div>
-    <nav>
-      <div class="ni a" onclick="pg('dash')">⬛ Dashboard</div>
-      <div class="ni" onclick="pg('srv')">🖥 My Servers</div>
-      <div class="ni" onclick="pg('con')">⌨ Console</div>
-      <div class="ni" onclick="pg('rank')">⭐ Ranks</div>
-      <div id="anav" style="display:none"><div class="ni" onclick="pg('adm')">🔐 Admin</div></div>
-    </nav>
-    <div class="suser">
-      <div id="suname">—</div>
-      <span class="badge" id="subadge">Newbie</span>
-    </div>
-  </div>
-
-  <div class="main">
-    <div class="pg a" id="pg-dash">
-      <div class="ptitle">Dashboard</div>
-      <div class="srow">
-        <div class="sc"><div class="sl">Your VPS</div><div class="sv ac" id="st-vps">0</div></div>
-        <div class="sc"><div class="sl">Running</div><div class="sv g" id="st-run">0</div></div>
-        <div class="sc"><div class="sl">Rank</div><div class="sv" id="st-rank">Newbie</div></div>
-      </div>
-      <div class="tc">
-        <div class="th">Recent Servers</div>
-        <table><thead><tr><th>Name</th><th>Status</th><th>Node</th><th>Location</th></tr></thead>
-        <tbody id="dt"></tbody></table>
-      </div>
+<nav class="navbar">
+    <div class="brand">
+        GRIM<span>VM</span>
     </div>
 
-    <div class="pg" id="pg-srv">
-      <div class="ptitle">My Servers</div>
-      <div class="tc">
-        <div class="th">All Servers <span style="font-size:11px;color:var(--muted)">Admins provision VPS</span></div>
-        <table><thead><tr><th>UUID</th><th>Name</th><th>Status</th><th>CPU</th><th>RAM</th><th>Actions</th></tr></thead>
-        <tbody id="st"></tbody></table>
-      </div>
+    <div>
+        <a href="/">Home</a>
+        <a href="/login.html">Login</a>
     </div>
+</nav>
 
-    <div class="pg" id="pg-con">
-      <div class="ptitle">Console</div>
-      <div class="tc" style="padding:18px">
-        <select id="csel"><option>— Select VPS —</option></select>
-        <div class="con" id="cout">Select a VPS above to view console access.</div>
-        <div class="tmi" id="tmi" style="display:none">
-          <div><span style="color:var(--muted)">SSH: </span><span id="tssh" style="color:var(--accent)"></span></div>
-          <div style="margin-top:5px"><span style="color:var(--muted)">Web: </span><a id="tweb" style="color:var(--green)" target="_blank"></a></div>
+<main class="hero">
+
+    <section class="hero-card">
+
+        <div class="badge">
+            ARIZNODES • GRIMVM #5
         </div>
-      </div>
-    </div>
 
-    <div class="pg" id="pg-rank">
-      <div class="ptitle">Rank System</div>
-      <div style="display:grid;gap:14px">
-        <div class="tc" style="padding:22px">
-          <div style="font-size:15px;font-weight:600;margin-bottom:14px">Current Rank: <span class="badge" id="rdsp">Newbie</span></div>
-          <div style="color:var(--muted);font-size:13px;line-height:2">
-            <div>🔵 <b style="color:var(--text)">Newbie</b> — Default. 0–1 VPS.</div>
-            <div>🔷 <b style="color:#0ea5e9">Pro</b> — 2+ VPS assigned.</div>
-            <div>💜 <b style="color:#a855f7">Ultimate</b> — 4+ VPS. Claim exclusive rewards.</div>
-          </div>
-        </div>
-        <div class="tc" style="padding:22px">
-          <div style="font-size:14px;font-weight:600;margin-bottom:12px">Claim Reward</div>
-          <div style="display:flex;gap:10px">
-            <input id="rcode" placeholder="Reward code" style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:9px 12px;color:var(--text);font-size:13px">
-            <button class="btn" style="width:auto;padding:9px 16px" onclick="claimR()">Claim</button>
-          </div>
-          <div id="rmsg" style="margin-top:10px;font-size:13px"></div>
-        </div>
-      </div>
-    </div>
+        <h1>
+            Powerful virtualization.
+            <br>
+            <span>Simple control.</span>
+        </h1>
 
-    <div class="pg" id="pg-adm">
-      <div class="ptitle">Admin Panel</div>
-      <div style="display:grid;gap:18px">
-        <div class="tc">
-          <div class="th">Users</div>
-          <table><thead><tr><th>ID</th><th>Username</th><th>Role</th><th>Rank</th><th>VPS</th><th>Status</th><th>Actions</th></tr></thead>
-          <tbody id="aut"></tbody></table>
-        </div>
-        <div class="tc">
-          <div class="th">All VPS</div>
-          <table><thead><tr><th>UUID</th><th>Name</th><th>Owner</th><th>Status</th><th>Actions</th></tr></thead>
-          <tbody id="avt"></tbody></table>
-        </div>
-        <div class="tc" style="padding:22px">
-          <div style="font-size:14px;font-weight:600;margin-bottom:16px">Create VPS</div>
-          <div class="grid2">
-            <div class="fg"><label>Name</label><input id="vn" placeholder="my-server"></div>
-            <div class="fg"><label>Owner ID</label><input id="vo" placeholder="1"></div>
-            <div class="fg"><label>Node ID</label><input id="vnd" placeholder="1"></div>
-            <div class="fg"><label>Docker Image</label><input id="vi" placeholder="ubuntu:22.04"></div>
-            <div class="fg"><label>RAM (MB)</label><input id="vm" placeholder="512"></div>
-            <div class="fg"><label>Disk (GB)</label><input id="vd" placeholder="10"></div>
-            <div class="fg"><label>CPU Cores</label><input id="vc" placeholder="1"></div>
-          </div>
-          <button class="btn" style="width:auto;padding:9px 20px" onclick="mkVPS()">Create VPS</button>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
+        <p>
+            GrimVM is a Docker-based virtualization
+            management panel built by the ArizNodes Team.
+        </p>
 
-<div id="toast"></div>
+        <div class="actions">
+            <a
+                class="button primary"
+                href="/login.html"
+            >
+                Open Panel
+            </a>
+        </div>
+
+    </section>
+
+    <section class="stats">
+
+        <div class="stat">
+            <strong id="apiStatus">...</strong>
+            <span>API</span>
+        </div>
+
+        <div class="stat">
+            <strong>Docker</strong>
+            <span>VPS Engine</span>
+        </div>
+
+        <div class="stat">
+            <strong>MySQL</strong>
+            <span>Database</span>
+        </div>
+
+        <div class="stat">
+            <strong>HTTPS</strong>
+            <span>Secure Gateway</span>
+        </div>
+
+    </section>
+
+</main>
 
 <script>
-const A='/api';
-let tok=localStorage.getItem('gvm_tok');
-let me=JSON.parse(localStorage.getItem('gvm_me')||'null');
-let vlist=[];
-
-async function api(m,p,b){
-  const o={method:m,headers:{'Content-Type':'application/json'}};
-  if(tok)o.headers['Authorization']='Bearer '+tok;
-  if(b)o.body=JSON.stringify(b);
-  try{
-    const r=await fetch(A+p,o);
-    return{ok:r.ok,status:r.status,data:await r.json()};
-  }catch(e){
-    return{ok:false,data:{error:'Network error: '+e.message}};
-  }
-}
-
-function toast(msg,t='ok'){
-  const el=document.getElementById('toast');
-  el.textContent=msg;el.className='show '+t;
-  setTimeout(()=>el.className='',3000);
-}
-
-function pg(n){
-  document.querySelectorAll('.pg').forEach(p=>p.classList.remove('a'));
-  document.querySelectorAll('.ni').forEach(i=>i.classList.remove('a'));
-  document.getElementById('pg-'+n)?.classList.add('a');
-  if(n==='srv')loadSrv();
-  if(n==='adm')loadAdm();
-  if(n==='con')loadCon();
-}
-
-async function login(){
-  const e=document.getElementById('lemail').value;
-  const p=document.getElementById('lpass').value;
-  const{ok,data}=await api('POST','/auth/login',{email:e,password:p});
-  if(!ok){
-    const el=document.getElementById('lerr');
-    el.textContent=data.error||'Login failed';el.style.display='block';return;
-  }
-  tok=data.token;me=data.user;
-  localStorage.setItem('gvm_tok',tok);
-  localStorage.setItem('gvm_me',JSON.stringify(me));
-  boot();
-}
-
-function boot(){
-  if(!tok)return;
-  document.getElementById('login').style.display='none';
-  document.getElementById('app').style.display='block';
-  document.getElementById('suname').textContent=me.username;
-  const b=document.getElementById('subadge');
-  b.textContent=me.rank;b.className='badge '+me.rank;
-  document.getElementById('st-rank').textContent=me.rank;
-  document.getElementById('rdsp').textContent=me.rank;
-  if(['admin','owner'].includes(me.role))
-    document.getElementById('anav').style.display='block';
-  loadDash();
-}
-
-async function loadDash(){
-  const{ok,data}=await api('GET','/vps',null);
-  if(!ok)return;
-  vlist=data.vps||[];
-  document.getElementById('st-vps').textContent=vlist.length;
-  document.getElementById('st-run').textContent=vlist.filter(v=>v.status==='running').length;
-  document.getElementById('dt').innerHTML=vlist.slice(0,5).map(v=>`
-    <tr>
-      <td>${v.name}</td>
-      <td><span class="dot ${v.status}"></span>${v.status}</td>
-      <td>${v.node_name||'—'}</td>
-      <td>${v.location||'—'}</td>
-    </tr>`).join('')||'<tr><td colspan="4" style="color:var(--muted);text-align:center">No VPS assigned.</td></tr>';
-}
-
-async function loadSrv(){
-  const{ok,data}=await api('GET','/vps',null);
-  if(!ok)return;
-  vlist=data.vps||[];
-  document.getElementById('st').innerHTML=vlist.map(v=>`
-    <tr>
-      <td style="font-family:var(--mono);font-size:11px">${v.uuid.slice(0,8)}</td>
-      <td>${v.name}</td>
-      <td><span class="dot ${v.status}"></span>${v.status}</td>
-      <td>${v.cpu_cores} vCPU</td>
-      <td>${v.memory_mb} MB</td>
-      <td>
-        <button class="ab s" onclick="pwr('${v.uuid}','start')">▶</button>
-        <button class="ab d" onclick="pwr('${v.uuid}','stop')">■</button>
-        <button class="ab c" onclick="openCon('${v.uuid}')">⌨</button>
-      </td>
-    </tr>`).join('')||'<tr><td colspan="6" style="color:var(--muted);text-align:center">No VPS found.</td></tr>';
-}
-
-async function pwr(uuid,act){
-  const{ok,data}=await api('POST',`/vps/${uuid}/power/${act}`,{});
-  toast(ok?data.message:data.error,ok?'ok':'err');
-  if(ok)loadSrv();
-}
-
-function openCon(uuid){
-  pg('con');
-  const v=vlist.find(x=>x.uuid===uuid);
-  if(!v)return;
-  document.getElementById('cout').textContent=
-    `Server: ${v.name}\nStatus: ${v.status}\nUUID:   ${uuid}\n\nUse tmate session below for terminal access.`;
-  if(v.tmate_session){
-    document.getElementById('tmi').style.display='block';
-    document.getElementById('tssh').textContent=v.tmate_session;
-    const web='https://tmate.io/t/'+v.tmate_session.split('/').pop();
-    const a=document.getElementById('tweb');
-    a.textContent=web;a.href=web;
-  }
-}
-
-function loadCon(){
-  const s=document.getElementById('csel');
-  s.innerHTML='<option>— Select VPS —</option>'+
-    vlist.map(v=>`<option value="${v.uuid}">${v.name} (${v.status})</option>`).join('');
-  s.onchange=()=>{if(s.selectedIndex>0)openCon(s.value)};
-}
-
-async function loadAdm(){
-  const[ur,vr]=await Promise.all([
-    api('GET','/admin/users',null),
-    api('GET','/admin/vps',null)
-  ]);
-  const users=ur.data.users||[];
-  const vpss=vr.data.vps||[];
-
-  document.getElementById('aut').innerHTML=users.map(u=>`
-    <tr>
-      <td>${u.id}</td><td>${u.username}</td><td>${u.role}</td>
-      <td><span class="badge ${u.rank}">${u.rank}</span></td>
-      <td>${u.vps_count}</td>
-      <td style="color:${u.banned?'var(--red)':'var(--green)'}">${u.banned?'Banned':'Active'}</td>
-      <td>
-        <button class="ab d" onclick="banU(${u.id})">Ban</button>
-        <button class="ab s" onclick="unbanU(${u.id})">Unban</button>
-      </td>
-    </tr>`).join('');
-
-  document.getElementById('avt').innerHTML=vpss.map(v=>`
-    <tr>
-      <td style="font-family:var(--mono);font-size:11px">${v.uuid.slice(0,8)}</td>
-      <td>${v.name}</td><td>${v.username}</td>
-      <td><span class="dot ${v.status}"></span>${v.status}</td>
-      <td><button class="ab d" onclick="delVPS('${v.uuid}')">Delete</button></td>
-    </tr>`).join('');
-}
-
-async function mkVPS(){
-  const b={
-    name:document.getElementById('vn').value,
-    owner_id:parseInt(document.getElementById('vo').value),
-    node_id:parseInt(document.getElementById('vnd').value),
-    image:document.getElementById('vi').value,
-    memory_mb:parseInt(document.getElementById('vm').value),
-    disk_gb:parseInt(document.getElementById('vd').value),
-    cpu_cores:parseInt(document.getElementById('vc').value),
-  };
-  const{ok,data}=await api('POST','/admin/vps',b);
-  toast(ok?'VPS created: '+data.uuid:data.error,ok?'ok':'err');
-  if(ok)loadAdm();
-}
-
-async function delVPS(uuid){
-  if(!confirm('Delete VPS '+uuid+'?'))return;
-  const{ok,data}=await api('DELETE','/admin/vps/'+uuid,null);
-  toast(ok?'Deleted':data.error,ok?'ok':'err');
-  if(ok)loadAdm();
-}
-
-async function banU(id){
-  const r=prompt('Ban reason:');if(!r)return;
-  const{ok,data}=await api('POST','/admin/users/'+id+'/ban',{reason:r});
-  toast(ok?'Banned':data.error,ok?'ok':'err');if(ok)loadAdm();
-}
-
-async function unbanU(id){
-  const{ok,data}=await api('POST','/admin/users/'+id+'/unban',{});
-  toast(ok?'Unbanned':data.error,ok?'ok':'err');if(ok)loadAdm();
-}
-
-async function claimR(){
-  const c=document.getElementById('rcode').value;
-  const{ok,data}=await api('POST','/api/rewards/claim',{code:c});
-  const m=document.getElementById('rmsg');
-  m.textContent=ok?'✅ '+data.reward.name:'❌ '+(data.message||data.error);
-  m.style.color=ok?'var(--green)':'var(--red)';
-}
-
-function showReg(){
-  const u=prompt('Username:'),e=prompt('Email:'),p=prompt('Password:');
-  if(!u||!e||!p)return;
-  api('POST','/auth/register',{username:u,email:e,password:p}).then(({ok,data})=>{
-    alert(ok?'Account created! Sign in.':'Error: '+data.error);
-  });
-}
-
-if(tok)boot();
+fetch("/api/health")
+    .then(response => response.json())
+    .then(data => {
+        document.getElementById("apiStatus").innerText = "ONLINE";
+    })
+    .catch(() => {
+        document.getElementById("apiStatus").innerText = "OFFLINE";
+    });
 </script>
+
 </body>
 </html>
 HTML
 
-# ── Composer install ──────────────────────────────────────────
-log "Running Composer..."
-cd "${APP_DIR}"
-COMPOSER_ALLOW_SUPERUSER=1 composer install \
-  --no-dev \
-  --optimize-autoloader \
-  --no-interaction \
-  --no-progress 2>&1 | tail -5
+# ------------------------------------------------------------
+# Login page
+# ------------------------------------------------------------
 
-# ── Permissions ───────────────────────────────────────────────
-log "Setting permissions..."
-chown -R www-data:www-data "${APP_DIR}"
-chmod -R 755 "${APP_DIR}"
-chmod -R 775 "${APP_DIR}/storage"
-chmod 600 "${APP_DIR}/.env"
+cat >"${FRONTEND_DIR}/login.html" <<'HTML'
+<!DOCTYPE html>
+<html lang="en">
+<head>
 
-# ── Reload Nginx ──────────────────────────────────────────────
-nginx -t 2>/dev/null && svc_reload nginx
+<meta charset="UTF-8">
 
-# ── Restore policy-rc.d ───────────────────────────────────────
-echo '#!/bin/sh
-exit 101' > /usr/sbin/policy-rc.d
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+>
 
-# ── Health check ──────────────────────────────────────────────
-log "Running health check..."
+<title>GrimVM Login</title>
+
+<link
+    rel="stylesheet"
+    href="/css/grim.css"
+>
+
+</head>
+
+<body>
+
+<div class="center">
+
+    <div class="login-card">
+
+        <div class="brand large">
+            GRIM<span>VM</span>
+        </div>
+
+        <h2>Sign in</h2>
+
+        <p class="muted">
+            Access your GrimVM account.
+        </p>
+
+        <input
+            id="username"
+            placeholder="Username"
+        >
+
+        <input
+            id="password"
+            type="password"
+            placeholder="Password"
+        >
+
+        <button
+            class="button primary full"
+            onclick="login()"
+        >
+            Login
+        </button>
+
+        <p id="result"></p>
+
+    </div>
+
+</div>
+
+<script>
+
+async function login() {
+
+    const username =
+        document.getElementById("username").value;
+
+    const password =
+        document.getElementById("password").value;
+
+    const response = await fetch(
+        "/api/auth/login",
+        {
+            method: "POST",
+            headers: {
+                "Content-Type":
+                    "application/json"
+            },
+            body: JSON.stringify({
+                username,
+                password
+            })
+        }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        document.getElementById(
+            "result"
+        ).innerText = data.detail;
+
+        return;
+    }
+
+    localStorage.setItem(
+        "grim_token",
+        data.token
+    );
+
+    window.location =
+        "/dashboard.html";
+}
+
+</script>
+
+</body>
+</html>
+HTML
+
+# ------------------------------------------------------------
+# Dashboard
+# ------------------------------------------------------------
+
+cat >"${FRONTEND_DIR}/dashboard.html" <<'HTML'
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+>
+
+<title>GrimVM Dashboard</title>
+
+<link
+    rel="stylesheet"
+    href="/css/grim.css"
+>
+
+</head>
+
+<body>
+
+<header class="topbar">
+
+    <div class="brand">
+        GRIM<span>VM</span>
+    </div>
+
+    <div>
+        <span id="username"></span>
+
+        <button
+            class="small-button"
+            onclick="logout()"
+        >
+            Logout
+        </button>
+    </div>
+
+</header>
+
+<div class="layout">
+
+    <aside class="sidebar">
+
+        <a class="active">Dashboard</a>
+        <a>My VPS</a>
+        <a>Console</a>
+        <a>Backups</a>
+        <a>Network</a>
+        <a>Settings</a>
+
+        <a
+            id="adminLink"
+            href="/admin.html"
+            style="display:none"
+        >
+            Admin Panel
+        </a>
+
+    </aside>
+
+    <main class="content">
+
+        <div class="page-title">
+            <h1>Dashboard</h1>
+            <p>Manage your GrimVM resources.</p>
+        </div>
+
+        <section class="cards">
+
+            <div class="card">
+                <span>VPS</span>
+                <strong id="vpsCount">0</strong>
+            </div>
+
+            <div class="card">
+                <span>Rank</span>
+                <strong id="rank">Newbie</strong>
+            </div>
+
+            <div class="card">
+                <span>Status</span>
+                <strong>Online</strong>
+            </div>
+
+        </section>
+
+        <section class="panel">
+
+            <div class="panel-header">
+                <h2>My VPS</h2>
+            </div>
+
+            <div id="vpsList"></div>
+
+        </section>
+
+    </main>
+
+</div>
+
+<script src="/js/dashboard.js"></script>
+
+</body>
+</html>
+HTML
+
+# ------------------------------------------------------------
+# Admin page
+# ------------------------------------------------------------
+
+cat >"${FRONTEND_DIR}/admin.html" <<'HTML'
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+>
+
+<title>GrimVM Admin</title>
+
+<link
+    rel="stylesheet"
+    href="/css/grim.css"
+>
+
+</head>
+
+<body>
+
+<header class="topbar">
+
+    <div class="brand">
+        GRIM<span>VM</span>
+    </div>
+
+    <a href="/dashboard.html">
+        Dashboard
+    </a>
+
+</header>
+
+<div class="layout">
+
+<aside class="sidebar">
+
+    <a class="active">
+        Admin Dashboard
+    </a>
+
+    <a>
+        Users
+    </a>
+
+    <a>
+        VPS
+    </a>
+
+    <a>
+        Nodes
+    </a>
+
+    <a>
+        Locations
+    </a>
+
+    <a>
+        Eggs
+    </a>
+
+    <a>
+        Mounts
+    </a>
+
+    <a>
+        Backups
+    </a>
+
+    <a>
+        Extensions
+    </a>
+
+    <a>
+        Security
+    </a>
+
+    <a>
+        Ranks
+    </a>
+
+    <a>
+        Audit Logs
+    </a>
+
+    <a>
+        Settings
+    </a>
+
+</aside>
+
+<main class="content">
+
+    <div class="page-title">
+
+        <h1>Admin Panel</h1>
+
+        <p>
+            Control GrimVM nodes, users and VPS.
+        </p>
+
+    </div>
+
+    <section class="cards">
+
+        <div class="card">
+            <span>Users</span>
+            <strong id="usersCount">0</strong>
+        </div>
+
+        <div class="card">
+            <span>VPS</span>
+            <strong id="vpsCount">0</strong>
+        </div>
+
+        <div class="card">
+            <span>Node</span>
+            <strong>ONLINE</strong>
+        </div>
+
+    </section>
+
+    <section class="panel">
+
+        <div class="panel-header">
+
+            <h2>Create VPS</h2>
+
+        </div>
+
+        <div class="form-grid">
+
+            <input
+                id="owner"
+                placeholder="Owner User ID"
+            >
+
+            <input
+                id="name"
+                placeholder="VPS Name"
+            >
+
+            <select id="image">
+
+                <option value="ubuntu:24.04">
+                    Ubuntu 24.04
+                </option>
+
+                <option value="ubuntu:22.04">
+                    Ubuntu 22.04
+                </option>
+
+                <option value="debian:13">
+                    Debian 13
+                </option>
+
+                <option value="debian:12">
+                    Debian 12
+                </option>
+
+                <option value="alpine:latest">
+                    Alpine
+                </option>
+
+            </select>
+
+            <input
+                id="cpu"
+                type="number"
+                value="1"
+                min="1"
+                max="32"
+                placeholder="CPU"
+            >
+
+            <input
+                id="ram"
+                type="number"
+                value="1024"
+                min="256"
+                placeholder="RAM MB"
+            >
+
+            <input
+                id="disk"
+                type="number"
+                value="10"
+                min="1"
+                placeholder="Disk GB"
+            >
+
+        </div>
+
+        <button
+            class="button primary"
+            onclick="createVPS()"
+        >
+            Create VPS
+        </button>
+
+        <p id="createResult"></p>
+
+    </section>
+
+    <section class="panel">
+
+        <div class="panel-header">
+            <h2>Users</h2>
+        </div>
+
+        <div id="usersList"></div>
+
+    </section>
+
+    <section class="panel">
+
+        <div class="panel-header">
+            <h2>VPS</h2>
+        </div>
+
+        <div id="vpsList"></div>
+
+    </section>
+
+</main>
+
+</div>
+
+<script>
+
+const token =
+    localStorage.getItem("grim_token");
+
+if (!token) {
+    window.location =
+        "/login.html";
+}
+
+const headers = {
+    "Authorization":
+        "Bearer " + token
+};
+
+async function verifyAdmin() {
+
+    const response = await fetch(
+        "/api/me",
+        { headers }
+    );
+
+    if (!response.ok) {
+        window.location =
+            "/login.html";
+
+        return;
+    }
+
+    const user =
+        await response.json();
+
+    if (user.role !== "admin") {
+        window.location =
+            "/dashboard.html";
+    }
+}
+
+async function loadUsers() {
+
+    const response = await fetch(
+        "/api/admin/users",
+        { headers }
+    );
+
+    if (!response.ok) return;
+
+    const users =
+        await response.json();
+
+    document.getElementById(
+        "usersCount"
+    ).innerText = users.length;
+
+    const box =
+        document.getElementById(
+            "usersList"
+        );
+
+    box.innerHTML = "";
+
+    users.forEach(user => {
+
+        const row =
+            document.createElement("div");
+
+        row.className = "list-row";
+
+        row.innerHTML = `
+            <div>
+                <strong>${user.username}</strong>
+                <span>
+                    ID ${user.id} •
+                    ${user.rank} •
+                    ${user.email}
+                </span>
+            </div>
+
+            <button
+                class="small-button"
+                onclick="toggleBan(${user.id}, ${user.banned})"
+            >
+                ${user.banned ? "Unban" : "Ban"}
+            </button>
+        `;
+
+        box.appendChild(row);
+
+    });
+}
+
+async function toggleBan(id, banned) {
+
+    const route =
+        banned
+        ? `/api/admin/users/${id}/unban`
+        : `/api/admin/users/${id}/ban`;
+
+    await fetch(
+        route,
+        {
+            method: "POST",
+            headers
+        }
+    );
+
+    loadUsers();
+}
+
+async function loadVPS() {
+
+    const response = await fetch(
+        "/api/vps",
+        { headers }
+    );
+
+    if (!response.ok) return;
+
+    const vps =
+        await response.json();
+
+    document.getElementById(
+        "vpsCount"
+    ).innerText = vps.length;
+
+    const box =
+        document.getElementById(
+            "vpsList"
+        );
+
+    box.innerHTML = "";
+
+    vps.forEach(item => {
+
+        const row =
+            document.createElement("div");
+
+        row.className = "list-row";
+
+        row.innerHTML = `
+            <div>
+                <strong>${item.name}</strong>
+                <span>
+                    ID ${item.id} •
+                    Owner ${item.owner_id} •
+                    ${item.status}
+                </span>
+            </div>
+
+            <button
+                class="small-button danger"
+                onclick="deleteVPS(${item.id})"
+            >
+                Delete
+            </button>
+        `;
+
+        box.appendChild(row);
+
+    });
+}
+
+async function createVPS() {
+
+    const result =
+        document.getElementById(
+            "createResult"
+        );
+
+    const body = {
+        owner_id: Number(
+            document.getElementById(
+                "owner"
+            ).value
+        ),
+
+        name:
+            document.getElementById(
+                "name"
+            ).value,
+
+        image:
+            document.getElementById(
+                "image"
+            ).value,
+
+        cpu: Number(
+            document.getElementById(
+                "cpu"
+            ).value
+        ),
+
+        ram_mb: Number(
+            document.getElementById(
+                "ram"
+            ).value
+        ),
+
+        disk_gb: Number(
+            document.getElementById(
+                "disk"
+            ).value
+        )
+    };
+
+    const response = await fetch(
+        "/api/admin/vps",
+        {
+            method: "POST",
+
+            headers: {
+                ...headers,
+                "Content-Type":
+                    "application/json"
+            },
+
+            body: JSON.stringify(body)
+        }
+    );
+
+    const data =
+        await response.json();
+
+    if (!response.ok) {
+        result.innerText =
+            data.detail || "Failed";
+
+        return;
+    }
+
+    result.innerText =
+        "VPS created successfully.";
+
+    loadVPS();
+}
+
+async function deleteVPS(id) {
+
+    if (
+        !confirm(
+            "Delete this VPS?"
+        )
+    ) return;
+
+    await fetch(
+        `/api/admin/vps/${id}`,
+        {
+            method: "DELETE",
+            headers
+        }
+    );
+
+    loadVPS();
+}
+
+verifyAdmin();
+loadUsers();
+loadVPS();
+
+</script>
+
+</body>
+</html>
+HTML
+
+# ------------------------------------------------------------
+# Dashboard JS
+# ------------------------------------------------------------
+
+cat >"${FRONTEND_DIR}/js/dashboard.js" <<'JS'
+const token =
+    localStorage.getItem("grim_token");
+
+if (!token) {
+    window.location =
+        "/login.html";
+}
+
+const headers = {
+    "Authorization":
+        "Bearer " + token
+};
+
+async function loadDashboard() {
+
+    const meResponse =
+        await fetch(
+            "/api/me",
+            { headers }
+        );
+
+    if (!meResponse.ok) {
+        logout();
+        return;
+    }
+
+    const me =
+        await meResponse.json();
+
+    document.getElementById(
+        "username"
+    ).innerText =
+        me.username;
+
+    document.getElementById(
+        "rank"
+    ).innerText =
+        me.rank;
+
+    if (me.role === "admin") {
+        document.getElementById(
+            "adminLink"
+        ).style.display =
+            "block";
+    }
+
+    const vpsResponse =
+        await fetch(
+            "/api/vps",
+            { headers }
+        );
+
+    const vps =
+        await vpsResponse.json();
+
+    document.getElementById(
+        "vpsCount"
+    ).innerText =
+        vps.length;
+
+    const box =
+        document.getElementById(
+            "vpsList"
+        );
+
+    box.innerHTML = "";
+
+    if (vps.length === 0) {
+
+        box.innerHTML = `
+            <div class="empty">
+                No VPS has been assigned
+                to your account yet.
+            </div>
+        `;
+
+        return;
+    }
+
+    vps.forEach(item => {
+
+        const row =
+            document.createElement(
+                "div"
+            );
+
+        row.className =
+            "list-row";
+
+        row.innerHTML = `
+            <div>
+                <strong>
+                    ${item.name}
+                </strong>
+
+                <span>
+                    ${item.image}
+                    • ${item.cpu} CPU
+                    • ${item.ram_mb} MB RAM
+                    • ${item.status}
+                </span>
+            </div>
+
+            <div class="button-group">
+
+                <button
+                    class="small-button"
+                    onclick="vpsAction(${item.id}, 'start')"
+                >
+                    Start
+                </button>
+
+                <button
+                    class="small-button"
+                    onclick="vpsAction(${item.id}, 'stop')"
+                >
+                    Stop
+                </button>
+
+                <button
+                    class="small-button"
+                    onclick="vpsAction(${item.id}, 'restart')"
+                >
+                    Restart
+                </button>
+
+            </div>
+        `;
+
+        box.appendChild(row);
+
+    });
+}
+
+async function vpsAction(id, action) {
+
+    await fetch(
+        `/api/vps/${id}/${action}`,
+        {
+            method: "POST",
+            headers
+        }
+    );
+
+    loadDashboard();
+}
+
+function logout() {
+
+    localStorage.removeItem(
+        "grim_token"
+    );
+
+    window.location =
+        "/login.html";
+}
+
+loadDashboard();
+JS
+
+# ------------------------------------------------------------
+# CSS
+# ------------------------------------------------------------
+
+cat >"${FRONTEND_DIR}/css/grim.css" <<'CSS'
+:root {
+    --bg: #08090d;
+    --panel: #11131a;
+    --panel2: #171a23;
+    --border: #262a35;
+    --text: #f1f3f7;
+    --muted: #8b92a3;
+    --accent: #ffffff;
+    --danger: #ff4d67;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family:
+        Inter,
+        Arial,
+        Helvetica,
+        sans-serif;
+}
+
+a {
+    color: inherit;
+    text-decoration: none;
+}
+
+.navbar,
+.topbar {
+    height: 72px;
+    padding: 0 30px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+    background: rgba(8, 9, 13, .95);
+}
+
+.brand {
+    font-size: 23px;
+    font-weight: 900;
+    letter-spacing: -1px;
+}
+
+.brand span {
+    color: #8f96a7;
+}
+
+.brand.large {
+    font-size: 30px;
+    margin-bottom: 20px;
+}
+
+.navbar a {
+    margin-left: 24px;
+    color: var(--muted);
+}
+
+.hero {
+    max-width: 1100px;
+    margin: 70px auto;
+    padding: 20px;
+}
+
+.hero-card {
+    background:
+        linear-gradient(
+            145deg,
+            #151821,
+            #0c0e13
+        );
+
+    border: 1px solid var(--border);
+
+    border-radius: 24px;
+
+    padding: 70px;
+}
+
+.badge {
+    display: inline-block;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 8px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+}
+
+.hero h1 {
+    font-size: 62px;
+    line-height: 1;
+    letter-spacing: -4px;
+    margin: 25px 0;
+}
+
+.hero h1 span {
+    color: var(--muted);
+}
+
+.hero p {
+    max-width: 650px;
+    font-size: 18px;
+    color: var(--muted);
+    line-height: 1.7;
+}
+
+.actions {
+    margin-top: 30px;
+}
+
+.button {
+    border: 0;
+    border-radius: 12px;
+    padding: 13px 18px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.button.primary {
+    background: var(--accent);
+    color: #08090d;
+}
+
+.button.full {
+    width: 100%;
+}
+
+.stats {
+    display: grid;
+    grid-template-columns:
+        repeat(4, 1fr);
+    gap: 15px;
+    margin-top: 20px;
+}
+
+.stat {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 20px;
+    border-radius: 16px;
+}
+
+.stat strong {
+    display: block;
+    font-size: 20px;
+}
+
+.stat span {
+    color: var(--muted);
+    font-size: 13px;
+}
+
+.center {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.login-card {
+    width: 420px;
+    max-width: 100%;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 35px;
+}
+
+.login-card h2 {
+    margin-bottom: 6px;
+}
+
+.muted {
+    color: var(--muted);
+}
+
+input,
+select {
+    width: 100%;
+    background: var(--panel2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 13px;
+    border-radius: 10px;
+    margin-bottom: 12px;
+    outline: none;
+}
+
+.layout {
+    display: grid;
+    grid-template-columns: 230px 1fr;
+    min-height: calc(100vh - 72px);
+}
+
+.sidebar {
+    border-right: 1px solid var(--border);
+    padding: 22px 15px;
+    background: #0b0d12;
+}
+
+.sidebar a {
+    display: block;
+    padding: 12px;
+    margin-bottom: 3px;
+    color: var(--muted);
+    border-radius: 9px;
+}
+
+.sidebar a:hover,
+.sidebar a.active {
+    background: var(--panel2);
+    color: var(--text);
+}
+
+.content {
+    padding: 30px;
+    max-width: 1400px;
+    width: 100%;
+}
+
+.page-title {
+    margin-bottom: 28px;
+}
+
+.page-title h1 {
+    margin: 0;
+    font-size: 34px;
+}
+
+.page-title p {
+    color: var(--muted);
+}
+
+.cards {
+    display: grid;
+    grid-template-columns:
+        repeat(3, 1fr);
+    gap: 15px;
+    margin-bottom: 20px;
+}
+
+.card,
+.panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+}
+
+.card {
+    padding: 22px;
+}
+
+.card span {
+    color: var(--muted);
+    display: block;
+}
+
+.card strong {
+    font-size: 28px;
+    margin-top: 8px;
+    display: block;
+}
+
+.panel {
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+.panel-header {
+    margin-bottom: 18px;
+    display: flex;
+    justify-content: space-between;
+}
+
+.panel-header h2 {
+    margin: 0;
+}
+
+.list-row {
+    padding: 16px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 20px;
+}
+
+.list-row strong,
+.list-row span {
+    display: block;
+}
+
+.list-row span {
+    color: var(--muted);
+    font-size: 13px;
+    margin-top: 5px;
+}
+
+.button-group {
+    display: flex;
+    gap: 6px;
+}
+
+.small-button {
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 11px;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.small-button.danger {
+    color: var(--danger);
+}
+
+.empty {
+    color: var(--muted);
+    padding: 30px;
+    text-align: center;
+}
+
+.form-grid {
+    display: grid;
+    grid-template-columns:
+        repeat(2, 1fr);
+    gap: 10px;
+}
+
+@media (max-width: 800px) {
+
+    .layout {
+        grid-template-columns: 1fr;
+    }
+
+    .sidebar {
+        display: none;
+    }
+
+    .hero-card {
+        padding: 35px;
+    }
+
+    .hero h1 {
+        font-size: 42px;
+    }
+
+    .stats,
+    .cards {
+        grid-template-columns: 1fr;
+    }
+
+    .form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .content {
+        padding: 18px;
+    }
+
+}
+CSS
+
+# ------------------------------------------------------------
+# Dockerfiles
+# ------------------------------------------------------------
+
+cat >"${DOCKER_DIR}/ubuntu/Dockerfile" <<'EOF'
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y \
+        bash \
+        curl \
+        wget \
+        sudo \
+        nano \
+        vim \
+        iproute2 \
+        iputils-ping \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+CMD ["/bin/bash", "-c", "while true; do sleep 3600; done"]
+EOF
+
+cat >"${DOCKER_DIR}/debian/Dockerfile" <<'EOF'
+FROM debian:13
+
+RUN apt-get update \
+    && apt-get install -y \
+        bash \
+        curl \
+        wget \
+        sudo \
+        nano \
+        vim \
+        iproute2 \
+        iputils-ping \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+CMD ["/bin/bash", "-c", "while true; do sleep 3600; done"]
+EOF
+
+# ------------------------------------------------------------
+# Nginx configuration
+# ------------------------------------------------------------
+
+cat >"${NGINX_DIR}/grimvm.conf" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+
+    server_name ${GRIM_DOMAIN};
+
+    root ${FRONTEND_DIR};
+    index index.html;
+
+    client_max_body_size 512M;
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
+
+        proxy_http_version 1.1;
+
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+}
+EOF
+
+rm -f /etc/nginx/sites-enabled/default
+
+ln -sf \
+    "${NGINX_DIR}/grimvm.conf" \
+    /etc/nginx/sites-enabled/grimvm.conf
+
+nginx -t
+
+systemctl enable nginx
+systemctl restart nginx
+
+# ------------------------------------------------------------
+# Systemd service
+# ------------------------------------------------------------
+
+cat >"${SERVICE_FILE}" <<EOF
+[Unit]
+Description=GrimVM Backend
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=${BACKEND_DIR}
+
+EnvironmentFile=${ENV_FILE}
+
+ExecStart=${BACKEND_DIR}/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000
+
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# ------------------------------------------------------------
+# Prepare database & admin
+# ------------------------------------------------------------
+
+log "Creating GrimVM database tables..."
+
+pushd "${BACKEND_DIR}" >/dev/null
+
+set -a
+source "${ENV_FILE}"
+set +a
+
+"${BACKEND_DIR}/venv/bin/python" bootstrap_admin.py
+
+popd >/dev/null
+
+# ------------------------------------------------------------
+# Systemd
+# ------------------------------------------------------------
+
+systemctl daemon-reload
+
+systemctl enable grimvm
+
+systemctl restart grimvm
+
+sleep 3
+
+# ------------------------------------------------------------
+# HTTPS
+# ------------------------------------------------------------
+
+if [[ "${GRIM_DOMAIN}" != "localhost" ]]; then
+
+    echo
+    read -r -p \
+        "Attempt automatic Let's Encrypt HTTPS setup for ${GRIM_DOMAIN}? [Y/n]: " \
+        ENABLE_SSL
+
+    ENABLE_SSL="${ENABLE_SSL:-Y}"
+
+    if [[ "${ENABLE_SSL}" =~ ^[Yy]$ ]]; then
+
+        if [[ -z "${ADMIN_EMAIL:-}" ]]; then
+            warn "No admin email supplied; skipping SSL."
+        else
+
+            log "Requesting Let's Encrypt certificate..."
+
+            if certbot \
+                --nginx \
+                --non-interactive \
+                --agree-tos \
+                --redirect \
+                --email "${ADMIN_EMAIL}" \
+                -d "${GRIM_DOMAIN}"; then
+
+                log "HTTPS certificate installed successfully."
+
+            else
+                warn "Certbot failed. GrimVM is still available over HTTP."
+                warn "Make sure DNS points ${GRIM_DOMAIN} to this server and run:"
+                warn "sudo certbot --nginx -d ${GRIM_DOMAIN}"
+            fi
+
+        fi
+
+    fi
+
+else
+    warn "Domain is localhost; HTTPS certificate was skipped."
+fi
+
+# ------------------------------------------------------------
+# Firewall
+# ------------------------------------------------------------
+
+log "Configuring basic firewall..."
+
+ufw allow OpenSSH >/dev/null 2>&1 || true
+ufw allow 80/tcp >/dev/null 2>&1 || true
+ufw allow 443/tcp >/dev/null 2>&1 || true
+
+echo "y" | ufw enable >/dev/null 2>&1 || true
+
+# ------------------------------------------------------------
+# Final health test
+# ------------------------------------------------------------
+
 sleep 2
-HTTP=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${APP_PORT}/ 2>/dev/null || echo "000")
 
-echo ""
-echo -e "${CYAN}${BOLD}══════════════════════════════════════════${RESET}"
-echo -e "${CYAN}${BOLD}  GrimVM v2.0 — Install Complete${RESET}"
-echo -e "${CYAN}${BOLD}══════════════════════════════════════════${RESET}"
-echo ""
-echo -e " Panel URL:   ${GREEN}https://${DOMAIN}${RESET}"
-echo -e " Local HTTP:  ${YELLOW}http://localhost:${APP_PORT}${RESET}"
-echo -e " Admin login: ${YELLOW}admin / admin${RESET}"
-echo -e " HTTP check:  ${HTTP}"
-echo ""
-echo -e " ${BOLD}Cloudflare Tunnel config:${RESET}"
-echo -e "   Type: ${CYAN}HTTP${RESET}"
-echo -e "   URL:  ${CYAN}localhost:${APP_PORT}${RESET}"
-echo ""
-echo -e " GitHub: https://github.com/Vasplayz90OG/GrimVM--5"
-echo -e " Copyright Reserved 2026 ArizNodes Team"
-echo -e "${CYAN}${BOLD}══════════════════════════════════════════${RESET}"
+if curl -fsS http://127.0.0.1:8000/api/health >/dev/null; then
+    log "Backend health check: OK"
+else
+    error "Backend health check failed."
+    journalctl -u grimvm --no-pager -n 100 || true
+    exit 1
+fi
+
+# ------------------------------------------------------------
+# Finished
+# ------------------------------------------------------------
+
+IP_ADDRESS="$(
+    hostname -I 2>/dev/null \
+    | awk '{print $1}'
+)"
+
+echo
+echo -e "${GREEN}============================================================${NC}"
+echo -e "${GREEN}                  GRIMVM INSTALLED                         ${NC}"
+echo -e "${GREEN}============================================================${NC}"
+echo
+echo "Version       : ${GRIM_VERSION}"
+echo "Author        : Vasplayz90 • ArizNodes Team"
+echo "Install       : ${INSTALL_DIR}"
+echo "Domain        : ${GRIM_DOMAIN}"
+echo "Admin user    : ${ADMIN_USERNAME}"
+echo
+echo "Panel:"
+echo "  http://${GRIM_DOMAIN}"
+echo
+if [[ "${GRIM_DOMAIN}" == "localhost" ]]; then
+    echo "Local:"
+    echo "  http://127.0.0.1"
+else
+    echo "Server IP:"
+    echo "  http://${IP_ADDRESS}"
+fi
+echo
+echo "Services:"
+echo "  Docker      : $(systemctl is-active docker || true)"
+echo "  Nginx       : $(systemctl is-active nginx || true)"
+echo "  GrimVM API  : $(systemctl is-active grimvm || true)"
+echo "  MySQL       : $(docker inspect -f '{{.State.Status}}' grimvm_mysql 2>/dev/null || true)"
+echo
+echo "Useful commands:"
+echo "  systemctl status grimvm"
+echo "  journalctl -u grimvm -f"
+echo "  systemctl restart grimvm"
+echo "  docker ps"
+echo "  docker network inspect ${GRIM_VPS_NETWORK}"
+echo
+echo -e "${GREEN}Installation complete.${NC}"
